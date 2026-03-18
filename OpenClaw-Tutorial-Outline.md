@@ -3,80 +3,86 @@
 
 **Target audience:** Developers with working knowledge of GitHub, Python, shell scripting, Docker, and Linux (crontab). No prior OpenClaw experience required.
 
-**Central theme:** This tutorial approaches OpenClaw with deliberate attention to safety, containment, and alignment from the very first step — not as an afterthought.
+**Central theme:** Autonomous agents are powerful and genuinely useful — and that power demands deliberate design. This tutorial builds a working OpenClaw deployment with safety, containment, and alignment as first-class design goals, not afterthoughts.
 
-**Source repositories (reference, not modified):**
-- `spark-ai` — infrastructure: Docker compose, scripts, configuration docs
-- `spark-ai-agents` — agent workspaces: identity files, runbooks, cron scripts
-- `OpenClaw-Gmail` — standalone worked example: Gmail/Contacts agent
+**Tutorial repository:** `github.com/cecat/OpenClaw-Tutorial` — contains this outline, the slide deck, and (when the hands-on lab is developed) a `gateway/` directory with platform configuration and an `agents/` directory with a parameterized agent workspace ready to deploy.
 
 ---
 
 ## Module 1 — What Is OpenClaw and Why This Approach? *(10 min)*
 
 ### 1.1 What OpenClaw Is (and Isn't)
-- OpenClaw is an **agent framework**, not a model — it gives a language model hands, memory, and a schedule
-- Open source, self-hosted; you own the configuration, credentials, and history
-- Compatible with local models (via vLLM) and cloud APIs (Anthropic, OpenAI)
-- Communicates through Slack, a web dashboard, Telegram, and more
-- The model does cognition; OpenClaw handles orchestration, file access, tool execution, and memory
+- OpenClaw is an **agent framework**, not a model — it gives a language model memory, tools, communication channels, and a schedule
+- Open source, self-hosted: you own the configuration, credentials, history, and behavior
+- Compatible with local models (via vLLM) and cloud APIs (Anthropic Claude, OpenAI)
+- Communicates through Slack, a web dashboard, Telegram, and 50+ other channels
+- The model provides cognition; OpenClaw provides orchestration, file access, tool execution, and memory
 
-### 1.2 Why "Safety-First"?
-- Autonomous agents are qualitatively different from chatbots: they take actions between conversations
-- A poorly configured agent can send emails, modify files, and reach network services — autonomously, while you sleep
-- The common tutorials skip the threat model and jump to the demo; this one doesn't
-- **This tutorial treats your agent the way you'd treat a new employee with access to your files, calendar, and email**: trust is earned, access is earned, autonomy is bounded
+### 1.2 What an Agent Actually Does (that a chatbot doesn't)
+- A chatbot waits for a question and answers it. An agent acts between conversations — on a schedule, in response to events, and on its own judgment about what to do next.
+- An agent can send your email, post to Slack, read your calendar, modify files, and call APIs — autonomously, while you sleep.
+- This is genuinely useful. It is also qualitatively different from a chatbot, and must be designed accordingly.
+- OpenClaw agents can be partially autonomous without being fully autonomous — calibrating that balance deliberately is what this tutorial is about.
 
-### 1.3 The Architecture in One Paragraph
-- A local or cloud LLM is served behind an OpenClaw gateway
-- The gateway manages agent identities, sessions, tool execution, and channel integrations
-- Agent "personality" and memory live in plain markdown files on disk — readable, auditable, version-controlled
-- All code execution runs inside ephemeral Docker sandbox containers — not on the host
-- Cron scripts on the host handle all scheduling decisions; the LLM handles judgment
+### 1.3 Why "Safety-First"?
+- Security and containment have historically been afterthoughts with exciting new technology — something addressed after adoption, once incidents accumulate, rather than before. OpenClaw is no exception to this pattern. The platform is powerful, the demos are compelling, and the natural instinct is to get something running and worry about hardening later.
+- The consequences of that pattern are well-documented in the OpenClaw ecosystem. By early 2026, SecurityScorecard's STRIKE team identified over 135,000 OpenClaw instances exposed to the public internet, with over 15,000 specifically vulnerable to remote code execution (CVE-2026-25253, the "ClawJacked" WebSocket hijack). The ClawHavoc campaign poisoned roughly 20% of the ClawHub skills registry with packages delivering credential stealers and backdoors — exploiting the reasonable but mistaken assumption that a public registry was curated or reviewed.
+- We cover safety, containment, and alignment in Module 2 — before setup, before configuration, before anything else — because the decisions you make in the first hour determine the blast radius of everything that goes wrong later. Understanding the risks is part of understanding the platform.
+- **The right mental model:** your agent acts in your name. Every email it sends is from you. Every Slack post is from you. Design accordingly — not by neutering the agent, but by designing the right boundaries. *(Module 2 covers this in full.)*
 
-### 1.4 What We'll Cover in This Lecture
-- **First:** The safety, containment, and alignment design charter — this drives every other decision
-- Platform setup: Docker stack, Tailscale, choosing a model with `config.yaml`
-- Agent identity: the 8 files that define who your agent is
-- Behavioral reliability: when and why agents don't do what you told them
-- Scheduling architecture: why the LLM should never decide when to act
-- Integrations: Slack, Gmail, runbooks, and the email outbox pattern
-- Lessons learned from a working production deployment
+### 1.4 Architecture Summarized
 
-*The hands-on lab (a separate session) will put this into practice using OpenClaw-Gmail as the worked example.*
+An OpenClaw deployment consists of a language model and a gateway, connected by a Docker internal network that is deliberately not exposed to the outside world. The gateway manages agent identities, conversation sessions, tool execution, and channel integrations (Slack, web dashboard, and others). Agent personality, memory, and task procedures live in plain markdown files in a workspace directory on the host — readable, auditable, and well-suited to version control.
+
+When an agent executes code or runs a script, it does so inside an ephemeral Docker sandbox container that is discarded after the task completes. That sandbox has only the network access you explicitly grant it — and we explicitly block it from reaching your LAN, other hosts, and SSH services via iptables rules. The gateway itself listens only on your Tailscale interface (a private VPN IP), making it unreachable from the public internet or your local network. Tailscale also provides HTTPS via its `serve` command, so the dashboard is accessible securely from your other devices without opening any ports.
+
+Scheduling is entirely host-side: cron scripts running on the host decide when to queue work; the LLM decides what to do with it. This separation — shell owns the clock, LLM owns judgment — is one of the design principles we'll return to throughout the tutorial.
+
+*The diagram and full setup walkthrough are in Module 3.*
+
+### 1.5 What This Lecture Covers
+1. The design charter: safety, containment, alignment, and separation of powers
+2. Platform architecture and choosing your model
+3. Agent identity: the files that define who your agent is
+4. Scheduling: why the shell owns the clock
+5. The scaffolding: runbooks, scripts, and cron
+6. Integrations: Slack and Google
+7. Lessons learned from a working deployment
+
+*The hands-on lab (a separate session) puts this into practice using `OpenClaw-Gmail` as the worked example.*
 
 ---
 
-## Module 2 — Safety, Containment, and Alignment: The Design Charter *(15 min)*
+## Module 2 — The Design Charter *(15 min)*
 
-> **This module is not a safety checklist appended to the end of the tutorial. It is the foundation.**
-> Every architecture decision in Modules 3–7 — sandboxing, iptables rules, the outbox pattern, `SOUL.md`, the two-repo split, the scheduling design — exists because of the principles established here. We cover it second, not last, because you should understand *why* before you're asked to execute *what*.
+> **This module is the foundation.** Every architecture decision in Modules 3–7 — sandboxing, iptables rules, the outbox pattern, SOUL.md, the scheduling design, the scaffolding — exists because of the principles established here. We cover it second, not last, because you should understand *why* before you are asked to execute *what*.
 
-### 2.1 The Threat Model: What Can Go Wrong
-Four distinct risk categories when running an autonomous agent:
+### 2.1 The Threat Model
+Four risk categories when running an autonomous agent. These are not hypothetical:
 
-1. **Prompt injection** — malicious content in files, email, or Slack tricks the agent into executing unintended commands
-2. **Lateral movement** — a compromised sandbox container reaches your LAN, other Tailscale nodes, or SSH destinations
-3. **Runaway external actions** — the agent sends emails, posts to public channels, or modifies critical files without human review
-4. **Credential exfiltration** — secrets (API keys, OAuth tokens) leak via outbound HTTP from within the sandbox
+1. **Prompt injection** — malicious content in email, files, or Slack instructs the agent to execute unintended commands. The agent cannot distinguish a legitimate instruction from one embedded in adversarial input unless the system is designed to limit what it can do with that input. This is a structural vulnerability: current LLMs do not enforce separation between instructions they are meant to execute and data they are meant to process. [*cite: Zverev et al., "Can LLMs Separate Instructions From Data?", ICLR 2025*]
 
-*These aren't hypothetical. We'll walk through each mitigation in Module 3.*
+2. **Lateral movement** — a sandbox container that can reach your LAN, other Tailscale nodes, or SSH services can be used as a pivot point. This is especially relevant when the agent's sandbox runs on a machine that also has access to other internal services.
 
-### 2.2 Alignment: What the Agent Should Never Do
-The core alignment document is `SOUL.md` — the behavioral invariants loaded into every inference call.
+3. **Runaway external actions** — the agent sends email, posts to public channels, or mutates external state without human review. It does this not out of malice but because it is trying to be helpful, and "helpful" was not bounded precisely enough.
 
-Key rules to establish from day one:
-- **Never proceed without explicit acknowledgment.** "DO NOT PROCEED," "WAIT," and "STOP" mean exactly that — not "acknowledge and continue."
-- **Never affect the gateway or other agents without explicit permission.** No restarting containers, no modifying gateway config.
-- **Never send external communications without human approval** (email, public Slack posts).
-- **Never sleep or block** — write deferred tasks to `TODO.md` instead; the heartbeat executes them.
-- **The cost of being wrong is far greater than the cost of waiting.** Hardcode this into your agent's soul.
+4. **Credential exfiltration** — API keys, OAuth tokens, and other secrets passed to the sandbox can leak via outbound HTTP if the sandbox has unrestricted network access.
 
-Why `SOUL.md` and not a system note somewhere? Because `SOUL.md` is one of the 8 files automatically loaded into every inference call. Rules that live only in secondary files may be ignored. *(Explained in depth in Module 4.)*
+5. **Supply chain / skills registry poisoning** — third-party skills installed from a public registry (ClawHub) may contain malicious code. The ClawHavoc campaign (January–February 2026) poisoned approximately 20% of ClawHub's registry with skills delivering credential stealers and backdoors; the only requirement to publish had been a GitHub account one week old, with no code review or signing. Any skill installed from a registry is code that runs inside your sandbox with the access you have granted it. Treat it accordingly.
+
+### 2.2 Alignment: Defining What the Agent Must Never Do
+The core alignment document is `SOUL.md` — one of exactly 8 files loaded into every inference call, every time. Alignment rules that live anywhere else may be invisible to the model.
+
+Essential rules to establish before connecting anything external:
+- **Stop means stop.** "DO NOT PROCEED," "WAIT," and "STOP" are not invitations to acknowledge and continue. They mean halt and report.
+- **The agent does not touch the gateway or its own configuration.** Not to fix a bug, not to improve performance, not to help with debugging. It reports and waits.
+- **External communications go through the outbox.** The agent queues; a human or deterministic script sends.
+- **Deferred work goes to TODO.md.** The agent does not sleep, loop, or block waiting for a future time. It writes the task and returns.
+- **The cost of stopping unnecessarily is low. The cost of acting incorrectly is high.** Encode this asymmetry explicitly.
 
 ### 2.3 Separation of Powers: Code for Procedure, LLM for Judgment
 
-This is the architectural principle that justifies the entire superstructure of runbooks, scripts, and cron jobs. It is not primarily about cost or efficiency — it is about **reliability, auditability, and testability**.
+This is the architectural principle that generates the entire scaffolding of runbooks, scripts, and cron jobs built in Modules 5 and 6. It is not primarily about token cost — it is about reliability, auditability, and testability.
 
 > **Anything deterministic is owned by code. Anything requiring judgment, creativity, or natural language understanding or generation is owned by the model. The boundary between them must be sharp and explicit.**
 
@@ -86,562 +92,608 @@ The two sides of the boundary:
 |---|---|
 | When to act (cron schedule) | Whether this email needs a reply |
 | Whether a TODO item is due (bash date comparison) | What the reply should say |
-| Fetching email from the Gmail API | Identifying action items in fetched email |
-| Routing rows in a spreadsheet by column value | Drafting a summary for ambiguous content |
+| Fetching messages from the Gmail API | Identifying action items in fetched email |
+| Routing rows in a spreadsheet by column value | Summarizing ambiguous content |
 | Counting, sorting, filtering structured data | Inferring priority from unstructured text |
 | Moving a file from outbox to sent | Deciding whether to approve a draft |
 | Sending an HTTP request with a known payload | Composing the payload from context |
 
-**Why this matters more than just efficiency:**
-- Code is deterministic: the same input always produces the same output. LLM output is probabilistic — shaped by context, session history, and model version.
-- Code is auditable: you can read exactly what it does. LLM reasoning is opaque — you can observe inputs and outputs, but not the path between them.
-- Code is testable: you can write a unit test. LLM behavior cannot be unit-tested; it can only be observed.
-- Code changes are precise: change one line, one behavior changes. LLM instruction changes are suggestions embedded in context — they usually work, until they don't.
+**Why this matters more than token cost:** Code is deterministic — the same input always produces the same output. LLM output is probabilistic, shaped by context, session history, and model version. Code is auditable — you can read exactly what it does. Code changes are precise — change one line, one behavior changes on the next execution, every time. An LLM "rule" is a suggestion embedded in context; it usually holds, until session history, model drift, or a long conversation erodes it.
 
-**The practical implication — the three-layer superstructure:**
+This design principle has a growing body of support in the research literature. Three converging lines of work are worth calling out:
 
-This principle is what generates the entire scaffolding you'll build in this tutorial:
+- **Architecture surveys** confirm that the spectrum from fully LLM-driven to structured/deterministic agent designs is a recognized axis of variation, and that reliability-critical applications systematically require more deterministic orchestration. [*cite: Masterman et al., "The Landscape of Emerging AI Agent Architectures for Reasoning, Planning, and Tool Calling: A Survey," arXiv:2404.11584, 2024*]
+
+- **MetaGPT** (ICLR 2024 oral) provides a compelling existence proof: by encoding Standard Operating Procedures (SOPs) into code and assigning deterministic roles to agents, it dramatically reduces cascading hallucinations caused by naively chaining LLMs — the same class of error that motivates our runbook + script scaffolding. [*cite: Hong et al., "MetaGPT: Meta Programming for A Multi-Agent Collaborative Framework," ICLR 2024, arXiv:2308.00352*]
+
+- **Blueprint First, Model Second** makes the argument most directly: a deterministic orchestration engine manages workflow structure while the LLM handles bounded, discrete sub-tasks — transforming agent behavior from unpredictable exploration into a verifiable and auditable process. [*cite: Qiu et al., "Blueprint First, Model Second: A Framework for Deterministic LLM Workflow," arXiv:2508.02721, 2025*]
+
+**A note on where the field is going:** Language models are improving rapidly and will increasingly be capable of calling tools, managing state, and making scheduling decisions reliably on their own. We value the code/LLM separation now because it gives us precision, auditability, and token efficiency with today's models. As models improve, the right boundary will shift — but the habit of thinking clearly about which layer owns which responsibility will remain valuable regardless.
+
+*(The "token waste" problem is quantified in Module 5 with a concrete table.)*
+
+*[TODO: locate the specific talk or paper by "Hugo" on this topic — the presenter made a compelling quantitative argument for this separation, possibly in a 2024 NeurIPS or ICML context. Confirm speaker's last name and add citation.]*
+
+**The scaffolding this principle generates:**
+
+The LLM sits atop three layers of deterministic scaffolding. Each layer calls down only — the LLM invokes runbooks, runbooks invoke scripts, scripts are triggered by cron. Information flows back up; control flows down.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  CRON SCRIPTS  (host — zero tokens, fully deterministic)    │
-│  check-todos.sh · reset-sessions.sh · send-approved-emails  │
-│  "When to act" — the scheduling engine                      │
-├─────────────────────────────────────────────────────────────┤
-│  PYTHON/BASH SCRIPTS  (sandbox — deterministic tools)       │
-│  gmail_api.py · contacts_api.py · sync-track-sheets.py      │
-│  "How to move and transform data" — no LLM involved         │
-├─────────────────────────────────────────────────────────────┤
-│  RUNBOOKS  (markdown read fresh at trigger time)            │
-│  RUNBOOK_EMAIL_DIGEST.md · RUNBOOK_INBOX_ANALYSIS.md        │
-│  "Which tools to call and in what order" — procedure        │
-├─────────────────────────────────────────────────────────────┤
-│  LLM (the OpenClaw agent)                                   │
+│  LLM — the OpenClaw agent                                   │
 │  Compose · Summarize · Triage · Decide · Communicate        │
-│  "What does this mean and what should we say" — judgment    │
+│  "What does this mean, and what should we do?"              │
+├─────────────────────────────────────────────────────────────┤
+│  RUNBOOKS  (markdown, read fresh from disk at trigger time) │
+│  "Which tools to call and in what order"                    │
+├─────────────────────────────────────────────────────────────┤
+│  SCRIPTS  (Python/bash, run deterministically in sandbox)   │
+│  "How to move, fetch, and transform data"                   │
+├─────────────────────────────────────────────────────────────┤
+│  CRON  (host-side, zero tokens, fully deterministic)        │
+│  "When to act — the scheduling engine"                      │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-Each layer calls down only — the LLM never calls the scheduler, scripts never call the LLM, cron never calls anything that requires context. Information flows up; decisions flow down.
-
-This structure also has a safety benefit: **the LLM cannot schedule itself**. It can write a TODO item requesting future work, but the decision of whether and when that item becomes `READY` is made by `check-todos.sh` on the host — outside the agent's reach entirely.
+This is not a strict call hierarchy — cron triggers the heartbeat, which triggers the LLM, which reads a runbook, which calls a script, whose output the LLM then acts on. But the separation of responsibilities is strict: no layer does work that belongs to another.
 
 ### 2.4 Containment: The Technical Layers
-A layered defense — each layer is explained in detail when it appears in setup:
 
-| Layer | Mechanism | Drives which setup decision |
+A layered defense. Each layer is described in detail when it appears in setup — listed here so the rationale is clear before the mechanics:
+
+| Layer | Mechanism | Threat it addresses |
 |---|---|---|
-| Network | Tailscale-only gateway binding | Module 3: `.env` `TAILSCALE_IP` binding |
-| Network | iptables DOCKER-USER rules | Module 3: Step 9, security hardening |
-| Execution | Sandbox mode: `mode: all` | Module 3: Step 10, `openclaw.json` |
-| Execution | No `docker.sock` in sandbox | Module 3: sandbox config |
-| Config | Disable `commands.config` writes | Module 3: Step 10, first hardening step |
-| Credentials | Separate dedicated accounts | Module 6: Gmail / Slack credential setup |
-| Outbox | Human approval for email | Module 6: outbox pattern |
+| Network | Tailscale-only gateway binding | Dashboard not reachable from internet or LAN |
+| Network | iptables DOCKER-USER rules | Sandbox containers cannot reach LAN, Tailscale, or SSH |
+| Execution | Sandbox mode: `mode: all` | Agent commands run in throwaway containers, not on the host |
+| Execution | No `docker.sock` in sandbox | No container escape |
+| Config | Disable `commands.config` writes | Agent cannot modify gateway configuration |
+| Credentials | Separate dedicated accounts | Compromised credential has limited blast radius |
+| Gateway exposure | Tailscale-only binding (not `0.0.0.0`) | Prevents WebSocket hijack from malicious websites (CVE-2026-25253 / "ClawJacked" class of attack) |
 
-*When you encounter each of these in Module 3 or 6, the "why" is already established here. We won't repeat it — we'll just execute it.*
+*When you encounter each of these in Modules 3–7, the "why" is already established here.*
 
-### 2.6 The Human-in-the-Loop Pattern
+The gap between what is possible and what is commonly deployed is striking: a 2025 survey of deployed agentic AI systems found that the majority document no sandboxing or containment mechanisms at all. [*cite: "The 2025 AI Agent Index," MIT, arXiv 2602.17753, 2025*] We treat these layers as non-negotiable precisely because the default is to omit them.
+
+### 2.5 The Human-in-the-Loop Pattern
 The **outbox pattern** is the cornerstone of supervised external action:
 
 ```
-Agent writes email JSON → shared/outbox/  (status: "pending")
-Supervisor agent or human reviews → sets "approved" or "rejected"
-Cron script (send-approved-emails.sh) sends approved emails → moves to sent/
+Agent writes draft JSON → shared/outbox/  (status: "pending")
+Human or supervisor agent reviews → marks "approved" or "rejected"
+Deterministic cron script sends approved items → archives to sent/
+Full audit trail preserved in outbox / sent / rejected
 ```
 
 - The LLM never directly sends email; it writes to a queue
-- A human (or a designated supervisor agent) reviews and approves
-- A deterministic cron script sends and archives
-- Full audit trail in outbox/sent/rejected directories
+- A deterministic script sends and archives — no LLM judgment at send time
+- The pattern applies to any action with real-world consequences: email, Slack posts, external API mutations
 
-This same pattern applies to any external action where errors have real-world consequences.
+### 2.6 Charter Summary
+Five principles that drive every decision in this tutorial:
 
-### 2.7 The Right Mental Model
-> Your agent is a diligent assistant, not an autonomous decision-maker. It can do a lot, but it acts in your name. Every email it sends is from you. Every Slack post is from you. Design accordingly.
-
-**Charter summary — five principles that drive every decision in this tutorial:**
-- *Separation of powers:* code owns anything deterministic; the LLM owns judgment, creativity, and language — the boundary is sharp and explicit
-- *Containment first:* network, execution, and config isolation before connecting anything external
-- *Alignment by design:* `SOUL.md` behavioral invariants are non-negotiable, not suggestions
-- *Human in the loop:* any external action with real-world consequences goes through an approval queue
-- *Verify, don't assume:* the LLM does not send acknowledgment receipts
+1. **Separation of powers** — code owns anything deterministic; the LLM owns judgment, creativity, and language. The boundary is sharp and explicit.
+2. **Containment first** — network, execution, and config isolation before connecting anything external.
+3. **Alignment by design** — `SOUL.md` behavioral invariants are established before the agent is given tools, and are non-negotiable.
+4. **Human in the loop** — any external action with real-world consequences goes through an approval queue.
+5. **Verify, don't assume** — after any behavioral or configuration change, confirm the next execution follows the new rule. The agent does not send receipts.
 
 ---
 
-## Module 3 — Platform Architecture and Setup *(20 min)*
+## Module 3 — Platform Architecture and Model Choice *(15 min)*
 
-### 3.1 Hardware and Model Options
-Three viable configurations:
+### 3.1 The Docker Stack
+```
+[You, via Tailscale]
+        |
+        v  port 18789 — Tailscale interface only, never 0.0.0.0
+[OpenClaw gateway container]
+        |
+        v  http://nim:8000/v1 — Docker-internal network only
+[vLLM container]  ← only present for local-model deployments
+        |
+        v
+[GPU + unified memory]
+```
 
-| Configuration | Hardware | Model | Notes |
+Two key design choices, both mandated by the design charter:
+- The model API endpoint is never exposed to the host or network — only reachable within the Docker internal network
+- The gateway listens only on the Tailscale interface — unreachable from the public internet or your LAN
+
+**What is Tailscale?** Tailscale is a zero-config VPN that assigns each enrolled device a stable private IP (in the `100.x.x.x` range). By binding the OpenClaw port to your machine's Tailscale IP, the dashboard is only reachable from other devices on your Tailscale network (your laptop, phone, etc.) — not from the internet or your local LAN. It also provides HTTPS via `tailscale serve`. Students must have Tailscale installed and running before the hands-on lab.
+
+### 3.2 Choosing Your Model
+
+Students choose one path at setup time and can switch at any time with a single config change:
+
+| Path | Hardware requirement | Model examples | Characteristic |
 |---|---|---|---|
-| Local GPU | NVIDIA DGX Spark (GB10) | Qwen3-Coder-Next-FP8 via vLLM | ~50 tps generation; ~$4K hardware |
-| Cloud API | Any Linux host | Anthropic Claude (claude-sonnet-4-6, etc.) | Pay-per-token; no GPU required |
-| Hybrid | Local GPU default + cloud for specific agents | Per-agent model config via config.yaml | Best of both |
+| Local GPU | Machine with dedicated GPU and sufficient memory (e.g., NVIDIA DGX Spark GB10, high-end workstation, Mac with Apple Silicon M-series) | Qwen3-Coder-Next-FP8 via vLLM | Low per-token cost; throughput depends on hardware; typically <100 tps |
+| Cloud API | Any Linux host (no GPU required) | Anthropic Claude (claude-sonnet-4-6, claude-haiku-4-5) | Pay-per-token; consistently fast; easier setup |
 
-*The tutorial uses the DGX Spark as a concrete example; the patterns apply to any configuration.*
+**On running a local model:** The key constraint is memory, not just GPU. A 32 GB unified memory machine (e.g., M-series Mac) can run smaller quantized models but will see lower throughput and may struggle with large context windows. Throughput matters for scheduled tasks — a 50-tps model can produce a 500-token email digest in 10 seconds; a 5-tps model takes 100 seconds. If you are not already confident your hardware can run a capable model, the cloud API path removes this variable entirely and lets you focus on the agent architecture, which is the point of this tutorial.
 
-### 3.2 The Docker Stack
-```
-[Your Mac via Tailscale]
-    |
-    v  port 18789, Tailscale IP only
-[OpenClaw container — gateway + CLI]
-    |
-    v  http://nim:8000/v1, Docker-internal only
-[vLLM container — Qwen3-Coder-Next-FP8]
-    |
-    v
-[GB10 GPU + 128GB unified memory]
-```
+**Our recommendation for the tutorial:** Use the cloud API (Anthropic Claude) unless you already have local model inference working. The architecture is identical — the only difference is one line in `config.yaml`.
 
-Key design choice: the model API is **never exposed to the host or network** — it is accessible only within the Docker internal network. OpenClaw is exposed **only on the Tailscale interface**.
+### 3.3 config.yaml: Your Model Switch
 
-### 3.3 The Two-Repo Pattern
-```
-~/code/
-├── spark-ai/                    # PUBLIC — infrastructure
-│   ├── docker-compose files
-│   ├── config.yaml              # per-agent model assignments
-│   ├── secrets.yaml             # gitignored — API keys
-│   └── openclaw/                # OpenClaw config helpers
-└── spark-ai-agents/             # PRIVATE — agent workspaces
-    ├── main/                    # Agent workspace (identity, memory, calendar)
-    ├── chattpc26/               # Second agent workspace
-    ├── scripts/                 # Cron scripts (run on host, not in sandbox)
-    └── shared/                  # Runtime state shared between agents
-```
+`config.yaml` lives in the infrastructure repo. It is the single file that controls which model backs each agent. Changes are applied without editing `openclaw.json` by hand.
 
-Why two repos?
-- Infrastructure is public and reusable; agent workspaces are private (contain personal context)
-- You can update the platform without touching agent identities, and vice versa
-- git history for agent evolution is separate from infrastructure git history
-
-### 3.4 First-Time Setup Walkthrough
-*Summary of the 14-step process (full detail in `spark-ai/README.md`):*
-
-**Steps 1–5: Platform**
-1. Clone repos (`spark-ai`, `spark-ai-agents`, `spark-vllm-docker`)
-2. Build the vLLM Docker image (source build for GB10 kernel support — 20-40 min)
-3. Create `.env` files — `TAILSCALE_IP` and `OPENCLAW_WORKSPACE` (host path!)
-4. Download the model (~46 GB via HuggingFace, resumable)
-5. Fix OpenClaw volume permissions (Docker creates as root; OpenClaw runs as uid 1000)
-
-**Steps 6–8: Gateway**
-6. Run OpenClaw onboarding: `docker compose run --rm openclaw-cli onboard --no-install-daemon`
-7. Set up Tailscale Serve for HTTPS dashboard access
-8. Confirm workspace uses **host paths** (critical gotcha — see sidebar)
-
-> **The host-path gotcha:** When OpenClaw spawns sandbox containers, it passes the workspace path directly to Docker as a bind-mount source. Docker resolves that path on the **host**, not inside the gateway. If you use the container-internal path (`/home/node/agents/main`), Docker creates an empty directory on the host — your agent starts with no identity files.
-
-**Steps 9–10: Security hardening (do this before connecting anything)**
-9. Block container lateral movement with iptables DOCKER-USER rules
-10. Harden openclaw.json: disable config writes, enable sandbox mode globally
-
-**Steps 11–14: Integrations (optional, covered in Module 6)**
-11. Slack
-12. Google Workspace (via gog or gsuite-mcp)
-13. Agent self-scheduling (TODO.md + check-todos.sh)
-14. Session management (daily session reset cron)
-
-### 3.5 Choosing Your Model: config.yaml
-
-`config.yaml` is the single place you control which LLM backs each agent. It lives in `spark-ai/` (infrastructure repo, not agent workspace) and is applied without manually editing `openclaw.json`.
-
-**The student choice — make it early, make it explicit:**
-
-| Path | Requirements | Cost | When to choose |
-|---|---|---|---|
-| Local GPU (vLLM) | NVIDIA GPU, ~46 GB storage, build time | Hardware amortized | You have a DGX Spark or similar |
-| Cloud API (Anthropic Claude) | `ANTHROPIC_API_KEY`, any Linux host | ~$3–10/month | Most students — no GPU needed |
-| Hybrid | Both | Both | Run most on local, route specific agents to Claude |
-
-*In this tutorial, when we say "cloud API" we mean Anthropic Claude. The patterns are identical for OpenAI if you prefer.*
-
-**config.yaml structure:**
 ```yaml
+# config.yaml — per-agent model assignments
 agents:
   main:
-    model: anthropic/claude-sonnet-4-6   # cloud path
-  chattpc26:
-    model: vllm/Qwen/Qwen3-Coder-Next-FP8   # local path
+    model: anthropic/claude-sonnet-4-6    # cloud path
+  gmail-agent:
+    model: vllm/Qwen/Qwen3-Coder-Next-FP8  # local path
 ```
 
-Supported model formats: `vllm/<model-id>`, `anthropic/claude-haiku-4-5`, `anthropic/claude-sonnet-4-6`, `anthropic/claude-opus-4-6`.
-
-**secrets.yaml (gitignored — never committed):**
+**`secrets.yaml`** (gitignored, never committed) holds API keys:
 ```yaml
 anthropic_api_key: sk-ant-...
 ```
-This file lives alongside `config.yaml` in `spark-ai/`. It is excluded from git via `.gitignore`. Copy from `secrets.yaml.example`, paste your key, done. For the local-GPU path it can remain empty.
 
-**Applying a change — the reload script:**
+**Applying a change:**
 ```bash
-./apply-config.sh --dry-run   # preview the openclaw.json patch
+./apply-config.sh --dry-run   # preview the patch to openclaw.json
 ./apply-config.sh             # apply and restart the gateway
 ```
-`apply-config.sh` patches `openclaw.json` inside the Docker volume directly — no manual JSON editing, no config file archaeology. It reads `config.yaml` and `secrets.yaml` together and generates the right gateway config. The gateway restarts automatically.
 
-**Emergency revert** (if something goes wrong after switching to cloud):
+**Emergency revert to local model:**
 ```bash
-./revert-to-local.sh
+./revert-to-local.sh          # strips all cloud config, restarts gateway
 ```
-Removes all remote-model config from `openclaw.json` and restarts the gateway. Safe to run any time.
 
-**The key point for students:** You do not need to choose at onboarding and live with it. `config.yaml` + `apply-config.sh` let you switch any agent to a different model at any time, in under 30 seconds, without touching `docker-compose.yml`. For the hands-on lab, students using the cloud path can be working alongside students using a local GPU — same agent workspace, different one line in `config.yaml`.
+The point: you do not need to choose once and live with it. Switch any agent to a different model in under 30 seconds. Students using cloud Claude and students using a local GPU work identically from this point forward.
 
-### 3.6 Security Verification Checklist
-Run these four checks before considering the platform production-ready:
+### 3.4 Repository Structure
+
+For the tutorial, students work with a single private repository:
+
+```
+OpenClaw-Tutorial/               ← your private repo
+├── spark-ai/                    ← companion public repo (submodule or clone)
+│   ├── docker-compose files
+│   ├── config.yaml              # model assignments — edit this
+│   ├── secrets.yaml             # gitignored — API keys
+│   └── apply-config.sh
+└── gmail-agent/                 ← from OpenClaw-Gmail, parameterized for you
+    ├── IDENTITY.md
+    ├── SOUL.md
+    ├── TOOLS.md
+    ├── ...                      # the 8 auto-loaded files
+    ├── runbooks/
+    └── scripts/
+```
+
+A single repo keeps things simple. The public/private split (two repos) is an option for those who want to share their infrastructure config with others — it is not required and adds coordination overhead most students don't need.
+
+### 3.5 Security Hardening Checklist
+
+Done once, before connecting any external service. Four verifications before calling the platform ready:
 
 ```bash
-# 1. vLLM NOT exposed to host
+# vLLM NOT exposed to host network
 ss -ltnp | grep :8000          # must show nothing
 
-# 2. OpenClaw bound to Tailscale IP only
+# OpenClaw bound to Tailscale IP only
 ss -tlnp | grep 18789          # must show TAILSCALE_IP:18789, not 0.0.0.0
 
-# 3. No SSH keys in gateway container
-docker compose exec openclaw-gateway ls /home/node/.ssh 2>&1   # must say no such file
+# No SSH keys in gateway container
+docker compose exec openclaw-gateway ls /home/node/.ssh   # must fail
 
-# 4. Three DOCKER-USER DROP rules in place
-sudo iptables -L DOCKER-USER -n | grep DROP   # must show 3 DROP rules
+# Sandbox container network isolation (3 DROP rules)
+sudo iptables -L DOCKER-USER -n | grep DROP   # must show 3 rules
 ```
 
 ---
 
-## Module 4 — Agent Identity and the System Prompt *(15 min)*
+## Module 4 — Agent Identity: The Workspace and the 8 Files *(15 min)*
 
-### 4.1 The 8 Auto-Loaded Files
-On every inference call — every Slack message, every heartbeat — OpenClaw rebuilds the system prompt from exactly these files:
+### 4.1 The Workspace
+An agent's workspace is a directory of plain markdown files mounted into the OpenClaw gateway container. Everything the agent knows about itself, its user, its tools, and its duties lives in these files — readable, auditable, editable in any text editor, and version-controlled in git.
 
-| # | File | Purpose |
+OpenClaw automatically loads exactly 8 of these files into the system prompt on every inference call. Everything else is invisible to the model unless the agent explicitly reads it with a tool call.
+
+**The files OpenClaw auto-loads (in order):**
+
+| # | File | What it holds |
 |---|---|---|
-| 1 | `AGENTS.md` | Sub-agent definitions |
-| 2 | `SOUL.md` | Persona, values, hard behavioral invariants |
-| 3 | `TOOLS.md` | How to use external tools (gog, scripts, etc.) |
-| 4 | `IDENTITY.md` | Who the agent is, Slack behavior contract |
-| 5 | `USER.md` | User context, preferences, and background |
-| 6 | `HEARTBEAT.md` | Always-on reflexes (runs every heartbeat) |
-| 7 | `BOOTSTRAP.md` | First-run orientation guidance |
-| 8 | `MEMORY.md` | Accumulated runtime knowledge |
+| 1 | `AGENTS.md` | Sub-agent definitions and routing |
+| 2 | `SOUL.md` | Persona, values, and hard behavioral invariants — the alignment document |
+| 3 | `TOOLS.md` | How to invoke external tools: scripts, APIs, gog, gsuite-mcp |
+| 4 | `IDENTITY.md` | Who the agent is; Slack behavior contract; list of recurring duties |
+| 5 | `USER.md` | User context, preferences, communication style, and background |
+| 6 | `HEARTBEAT.md` | Always-on reflexes executed on every heartbeat |
+| 7 | `BOOTSTRAP.md` | First-run orientation — how to set up a fresh identity |
+| 8 | `MEMORY.md` | Accumulated runtime knowledge promoted from daily memory files |
 
-**Everything else is NOT auto-loaded.** `CALENDAR.md`, `EMAIL.md`, runbooks, templates, `PATHS.md` — invisible to the model unless the agent explicitly reads them via a tool call.
+**Budget:** 20,000 characters per file; 150,000 characters total system prompt. If a file exceeds its budget, OpenClaw keeps the first 70% and last 20%.
 
-Budget: 20,000 characters per file; 150,000 characters total. If a file exceeds this, OpenClaw keeps the first 70% and last 20%.
+**Everything else is NOT auto-loaded:** `CALENDAR.md`, `EMAIL.md`, `PATHS.md`, `CHANNELS.md`, runbooks, templates — invisible unless the agent reads them explicitly. More on this shortly.
 
-### 4.2 What Goes Where
+### 4.2 What Each File Should (and Should Not) Contain
 
-| Content type | Right home | Wrong home |
+**`SOUL.md`** holds the behavioral invariants that must hold unconditionally. If a rule must never be violated, it belongs here — not in a secondary file. Keep it focused: this is constitutional law, not policy.
+
+**`IDENTITY.md`** describes who the agent is — its name, its Slack behavior contract, and a concise list of its recurring duties. Duties are listed here (what and when), but the how belongs in runbooks (read separately, covered in Module 6). Do not duplicate rules from SOUL.md here — reference them.
+
+**`TOOLS.md`** is the agent's tool manual. It explains how to call each script, what arguments it takes, and what it returns. When a new script is added to the workspace, TOOLS.md gets a new entry.
+
+**`USER.md`** holds everything the agent needs to know about you: your background, preferences, communication style, and context. This file is what makes the agent feel personal rather than generic.
+
+**`HEARTBEAT.md`** contains only always-on reflexes — things the agent does on every heartbeat for the lifetime of the agent. Check the TODO queue for READY items. Scan for rejected emails. Infrastructure-level reflexes only. Day-of-week logic, time-window checks, and task-specific procedures do not belong here.
+
+**`BOOTSTRAP.md`** is the first thing a fresh agent reads. It walks the agent through establishing its identity — choosing a name, filling in USER.md, understanding its tools. Best practice: make this the subject of the very first message to a new agent, before anything else. After initial setup, BOOTSTRAP.md becomes dormant orientation material.
+
+**`MEMORY.md`** is runtime knowledge promoted from daily memory files (`memory/YYYY-MM-DD.md`). The agent writes daily entries during conversations; important facts get promoted here for long-term retention. This is one of the two files the agent actively writes to (the other being `TODO.md`).
+
+### 4.3 The Files That Are NOT Auto-Loaded — and Why That Matters
+
+Several important files live in the workspace but are invisible to the agent unless explicitly requested:
+
+**`PATHS.md`** — the canonical registry of every absolute path used by the agent: workspace root, shared directory, script locations, outbox paths. When we discovered that path strings were being duplicated across TOOLS.md, multiple runbooks, and HEARTBEAT.md — and drifting out of sync as the workspace evolved — we created PATHS.md as the single source of truth. All other files now reference PATHS.md rather than hard-coding paths. The agent reads PATHS.md at the start of any task involving file I/O.
+
+**`CHANNELS.md`** — a registry of which Slack channel maps to which agent, including channel IDs and routing rules. Needed as soon as you have more than one agent sharing a Slack workspace.
+
+**`CALENDAR.md`** — the recurring duty schedule. Critically, this file is not read by the LLM to decide what to do — it is read by `check-todos.sh` (a bash script running on the host) to determine when to queue work for the agent. The separation is deliberate and central to the scheduling architecture in Module 5.
+
+**`EMAIL.md`, templates, runbooks** — task-specific reference material read on demand. Because these are not auto-loaded, rules or paths that only appear in them may never reach the agent in a given session.
+
+The implication: **anything the agent must do correctly and consistently must live in one of the 8 auto-loaded files.** Everything else is reference material.
+
+### 4.4 The Single-Source-of-Truth Principle in Practice
+
+The most insidious class of agent configuration bug is the duplicated instruction. When the same rule, path, or fact appears in more than one file, they will eventually diverge — and the agent will silently blend contradictory signals into inconsistent behavior.
+
+Examples of how this manifests:
+- `SOUL.md` says "always get approval before sending email." `IDENTITY.md` has an older version of the same rule, phrased differently, with an implicit exception you added and forgot to add to SOUL.md. The agent interprets the combination as having a situational exception — sometimes it asks, sometimes it doesn't.
+- A script path is hard-coded in `TOOLS.md`, `RUNBOOK_EMAIL_DIGEST.md`, and `HEARTBEAT.md`. The scripts directory is renamed. You update two of the three. The third silently fails on the next trigger.
+
+The fix is architectural: **one authoritative home for each fact.** PATHS.md for paths. SOUL.md for behavioral invariants. IDENTITY.md for duties. Other files reference these — they do not repeat them.
+
+### 4.5 How Reliably Does the Agent Follow the 8 Files?
+
+More reliably than secondary files, but not unconditionally. There are two important nuances:
+
+**Instructions vs. examples.** OpenClaw rebuilds the system prompt from the 8 files on every call — but it also sends the full session history (the accumulated back-and-forth since the last session reset). When instruction text and behavioral examples in the history conflict, examples often win. An agent with many examples of old behavior in its session history may not immediately adopt a newly-written rule, even in SOUL.md.
+
+**What this means for updates.** Updating a file on disk does not guarantee the agent immediately adopts the new behavior. Any behavioral change requires four steps: (1) edit the right file, (2) reset the session to clear counter-examples from history, (3) explicitly tell the agent about the change in the first message of the new session, (4) verify the next execution follows the new rule.
+
+**Reliability tiers:**
+
+| Source | When agent sees it | Reliability |
 |---|---|---|
-| Hard behavioral rules ("never send without approval") | `SOUL.md` or `IDENTITY.md` | `EMAIL.md`, templates |
-| Output format specs for Slack | `IDENTITY.md` | template files |
-| Step-by-step task procedures | `runbooks/` (read at trigger time) | `HEARTBEAT.md` |
-| Recurring schedule | `CALENDAR.md` (read by bash) | `HEARTBEAT.md` |
-| Email body templates | `templates/` (agent reads explicitly) | any of the 8 files |
-
-Rule of thumb: **Anything the agent must do correctly without fail belongs in the 8 auto-loaded files.** Anything variable or task-specific belongs in files the agent reads on demand.
-
-### 4.3 Behavioral Reliability: The Three Tiers
-
-| Change location | When agent sees it | Reliability |
-|---|---|---|
-| One of the 8 system-prompt files | Next inference call | High — but session history can override |
-| Non-auto-loaded file (`EMAIL.md`, templates) | Only when agent explicitly re-reads | Indeterminate — may never happen |
-| A RUNBOOK | Read fresh from disk on every trigger | **Reliable** — no caching between runs |
-| Session history (old behavior examples) | Every call, until session is reset | Works against you |
-
-### 4.4 The Session History Problem
-The system prompt is rebuilt fresh on every call — but OpenClaw also sends the **full conversation history** (the accumulated back-and-forth from the session `.jsonl` file). The LLM weighs them together.
-
-When instruction text and behavioral examples conflict, **examples often win.** A long-running session with many examples of old behavior can override a freshly-updated `SOUL.md` instruction.
-
-Consequence: updating a file on disk does not guarantee the agent immediately adopts the new behavior.
-
-### 4.5 How to Lock In a Behavioral Change
-Four steps, every time:
-
-1. **Put the rule in the right place** — critical rules go in `SOUL.md` or `IDENTITY.md`, not secondary files
-2. **Reset the session immediately** — truncate the `.jsonl` to remove accumulated examples of old behavior:
-   ```bash
-   docker exec openclaw-gateway truncate -s 0 \
-     /home/node/.openclaw/agents/<agent-id>/sessions/main.jsonl
-   ```
-3. **If the rule is in a non-auto-loaded file, tell the agent** — DM it to re-read the file in the fresh session
-4. **Verify** — confirm the next execution follows the new rule; do not assume
-
-### 4.6 The Context Duality (Architectural Implication)
-The same mechanism that allows the agent to understand nuance and write in your voice also means you cannot precisely update one rule in isolation. The model integrates everything simultaneously.
-
-This is the behavioral face of the separation of powers principle established in §2.3. An LLM instruction is a suggestion embedded in probabilistic context — it usually holds, until session history, a long conversation, or model drift erodes it. A Python script has no context and no drift: change one line, one behavior changes, on the next execution, every time.
-
-The practical implication is not "LLMs are unreliable" — it's **know which layer owns each responsibility and don't let them bleed into each other**. The agent composes the email; the script sends it. The agent decides a task is done; the cron script archives the record. The agent writes the TODO; bash decides when it fires.
-
-### 4.7 BOOTSTRAP.md: Setting Up the First Agent
-- `BOOTSTRAP.md` runs on the first conversation with a fresh agent
-- It walks the agent through picking a name, establishing personality, filling in `USER.md`
-- Best practice: send this as the very first message — *before* you ask the agent anything else
-- After initial setup, `BOOTSTRAP.md` becomes dormant orientation material
+| One of the 8 auto-loaded files | Every inference call | High — with session reset after changes |
+| Non-auto-loaded file | Only when agent explicitly reads it | Indeterminate |
+| A runbook (read at trigger time) | Fresh from disk on every trigger | Most reliable for procedural changes |
+| Session history examples | Every call until session reset | Works against you after behavioral changes |
 
 ---
 
-## Module 5 — Scheduling Architecture *(15 min)*
+## Module 5 — Scheduling: The Shell Owns the Clock *(12 min)*
 
 ### 5.1 The Core Principle
-> **LLM inference is expensive and non-deterministic. Bash is free and exact.**
->
-> The *decision of when to act* should always be made by deterministic code. The *act of doing the work* should be handled by the LLM. These two responsibilities must not be mixed.
+
+> **The decision of when to act is always owned by deterministic code. The act of doing the work is owned by the LLM. These two responsibilities must never be mixed.**
+
+An LLM has no clock. It has no reliable memory of having acted in a previous session. If you ask it to decide whether it is time to run a task, it will reason through that question every time it runs — and it will sometimes be wrong.
 
 ### 5.2 The Token-Waste Problem
-A 15-minute heartbeat fires **672 times per week**. If an agent checks `HEARTBEAT.md` to decide whether it's time to run a weekly report, it reasons through the question 672 times — including the 671 times the answer is "no":
 
-| Task frequency | Heartbeats/week | Useful fires | Wasted LLM calls | Waste rate |
-|---|---|---|---|---|
-| Once a week | 672 | 1 | 671 | 99.9% |
-| Mon + Thu | 672 | 2 | 670 | 99.7% |
-| Once a day (weekdays) | 672 | 5 | 667 | 99.3% |
+A 15-minute heartbeat fires **672 times per week**. If `HEARTBEAT.md` instructs the agent to check whether it's time to run a weekly report, the agent reasons through that question 672 times — and acts on 1 of them:
 
-Beyond token cost: LLM-based scheduling is fragile. The agent must remember whether it already ran the task today — state that doesn't survive a session reset. It will sometimes fire twice, sometimes not at all.
+| Task frequency | Heartbeats/week | Useful fires | Wasted LLM calls |
+|---|---|---|---|
+| Once a week | 672 | 1 | 671 (99.9% waste) |
+| Mon + Thu | 672 | 2 | 670 (99.7% waste) |
+| Weekdays at 9am | 672 | 5 | 667 (99.3% waste) |
+
+Beyond token cost: the agent must remember whether it already ran the task today — state that does not survive a session reset. LLM-driven scheduling fires twice, then not at all, then twice again.
 
 ### 5.3 Three Tiers of Scheduling
 
 | Tier | File | Owned by | Lifecycle | Use for |
 |---|---|---|---|---|
-| Always-on | `HEARTBEAT.md` | Human | Forever, while agent lives | Infrastructure reflexes run every heartbeat |
-| Recurring | `CALENDAR.md` | Human (or agent with approval) | Season or finite duty | Day-of-week or daily recurring tasks |
-| One-shot | `TODO.md` | Agent (runtime) | Ad hoc | Single deferred tasks written at runtime |
+| Always-on | `HEARTBEAT.md` | Human | Permanent | Infrastructure reflexes on every heartbeat |
+| Recurring | `CALENDAR.md` | Human | Season or project | Day-of-week, daily, monthly recurring tasks |
+| One-shot | `TODO.md` | Agent (at runtime) | Ad hoc | Single deferred tasks written during a conversation |
 
-**The human analogy:**
-- HEARTBEAT.md = brushing teeth (every day, forever, no thought required)
-- CALENDAR.md = "send the Mon/Thu reports through June"
-- TODO.md = "call the dentist," "pick up eggs"
+**The human analogy:** HEARTBEAT.md is brushing your teeth — every day, forever, no thought required. CALENDAR.md is "send the Monday/Thursday reports through June." TODO.md is "call the dentist" or "pick up eggs."
+
+**The critical distinction for TODO.md vs. CALENDAR.md:** If a task needs to happen again next week, it belongs in CALENDAR.md. An agent that re-schedules recurring tasks by writing new TODO.md entries will lose track of them after a session reset — they disappear silently.
 
 ### 5.4 The Scheduling Engine: check-todos.sh
 
 ```
-cron (every 5 min, zero tokens)
+cron (every 5 minutes — zero tokens)
   └─ check-todos.sh
        ├─ reads CALENDAR.md → is a recurring entry due? → writes READY to TODO.md
-       └─ reads TODO.md     → is a one-shot entry past-due? → marks READY in-place
+       └─ reads TODO.md → is a one-shot past its time? → marks READY in-place
 
-OpenClaw heartbeat (every 15 min, tokens only when READY work exists)
-  └─ agent greps TODO.md for ^READY lines
-       ├─ none found → HEARTBEAT_OK  (cheap: no reasoning required)
-       └─ READY found → execute task  (this is where the LLM earns its keep)
+OpenClaw heartbeat (every 15 minutes — tokens only when READY work exists)
+  └─ agent greps TODO.md for READY items
+       ├─ none found → HEARTBEAT_OK      (cheap — no reasoning required)
+       └─ READY found → execute task     (LLM earns its keep here)
 ```
 
-Result: 671 wasted reasoning sessions collapse to 671 near-free grep operations.
-
-**State tracking:** `check-todos.sh` records last-fired timestamps in `shared/todos/calendar-state.json` — not in the agent's memory. Deduplication survives session resets.
+**State tracking:** `check-todos.sh` records last-fired timestamps in `shared/todos/calendar-state.json` on the host — not in the agent's memory. Deduplication survives session resets.
 
 **CALENDAR.md format:**
 ```
-# Format: DAYS HH:MM UTC | task description
-DAILY    14:00 | Run data-sync script per runbooks/RUNBOOK_DAILY_SYNC.md
-MON,THU  14:00 | Send notification emails per runbooks/RUNBOOK_NOTIFICATIONS.md
+# DAYS HH:MM UTC | task description (points to its runbook)
+DAILY    14:00 | Run daily sync per runbooks/RUNBOOK_DAILY_SYNC.md
+MON,THU  14:00 | Send notifications per runbooks/RUNBOOK_NOTIFICATIONS.md
 ```
 
-### 5.5 What Belongs Where (Scheduling)
-- **HEARTBEAT.md:** Things the agent should do on *every* heartbeat, for the lifetime of the agent. Check the TODO queue. Scan for rejected emails. Infrastructure-level reflexes only.
-- **HEARTBEAT.md does NOT belong:** Day-of-week logic, time-window checks, "only on Mondays." This creates a fragile implicit state machine and wastes tokens.
-- **TODO.md does NOT belong:** Recurring tasks. If a task needs to happen again next week, it belongs in CALENDAR.md. An agent that re-schedules recurring tasks in TODO.md will forget after a session reset.
+### 5.5 Session Management
 
-### 5.6 Session Management (Critical for Local Models)
-OpenClaw replays the full conversation history on every call. As history grows, every interaction gets slower.
+OpenClaw replays the full conversation history on every inference call. As session history grows, latency grows — not because of context size per se, but because of unbounded growth in the history file.
 
-**Prefill vs. generation** (why this matters more than you think):
-- *Generation* (output tokens) runs at ~50 tps on a GB10 — the number quoted in benchmarks
-- *Prefill* (processing input) runs in parallel across all input tokens simultaneously: 10,000 tokens prefills in **1–3 seconds**, not 200 seconds
-- Session history is the real latency risk: unlike the system prompt (bounded at 150K chars), session history grows without a hard cap
+**Prefill vs. generation** — a nuance worth understanding: LLM generation (output tokens) runs sequentially at ~50 tps on a capable local GPU. Prefill (processing the input — system prompt + history) runs in parallel across all input tokens and is much faster: 10,000 tokens prefill in ~1–3 seconds. Session history is the real latency risk because it grows without a hard cap, while the system prompt is bounded at 150K characters.
 
-**Session management cron jobs:**
-```bash
-# Monitor session sizes every 5 min
-*/5 * * * *  monitor-sessions.sh
-
-# Archive and truncate sessions >512KB daily at 3am
-0 3 * * *    reset-sessions.sh
-
-# Seed missing heartbeat session files after container restarts
-*/30 * * * * seed-sessions.sh
+**Session management scripts** (run via cron on the host):
+```
+*/5  * * * *  monitor-sessions.sh    # log session file sizes every 5 min
+0 3  * * *    reset-sessions.sh      # archive and truncate sessions >512KB daily
+*/30 * * * *  seed-sessions.sh       # restore missing heartbeat session files
 ```
 
-### 5.7 The Full Crontab
-Five cron scripts constitute the entire "automation layer" outside the LLM:
+### 5.6 The Full Host-Side Crontab
+
+Five deterministic scripts constitute the entire automation layer outside the LLM:
 
 ```
-*/5  * * * * check-todos.sh        # scheduling engine
-*/5  * * * * monitor-sessions.sh   # session size logging
-*/30 * * * * seed-sessions.sh      # heartbeat session recovery
-0 3  * * *   reset-sessions.sh     # daily session archive/truncate
-*/30 * * * * send-approved-emails.sh  # human-approved email sender
+TZ=America/Chicago
+*/5  * * * *  check-todos.sh           # scheduling engine — promotes READY items
+*/5  * * * *  monitor-sessions.sh      # session size logging
+*/30 * * * *  seed-sessions.sh         # heartbeat session file recovery
+0    3 * * *  reset-sessions.sh        # daily archive and truncate
+*/30 * * * *  send-approved-emails.sh  # send human-approved outbox emails
 ```
 
-All run on the **host** as the deploying user — not inside any Docker container.
+All run on the **host** as the deploying user — not inside any container. Nothing in this crontab requires the LLM to be running or responsive.
 
 ---
 
-## Module 6 — Runbooks, Scripts, and Integrations *(10 min)*
+## Module 6 — The Scaffolding: Runbooks, Scripts, and Cron *(10 min)*
 
-### 6.1 RUNBOOKs: Procedures the Agent Follows
-A `RUNBOOK_<topic>.md` file in the agent's `runbooks/` directory gives step-by-step instructions for a specific recurring task.
+### 6.1 The Three-Layer Pattern Revisited
 
-The three-file authoring pattern for any new recurring duty:
-1. One line in `IDENTITY.md` — *what* the duty is
-2. One file `runbooks/RUNBOOK_X.md` — *how* to execute it
-3. One line in `CALENDAR.md` — *when* to execute it
+The scaffolding from §2.3 is now concrete. Each layer has a specific role and a specific location:
 
-RUNBOOKs are **read fresh from disk on every trigger** — not held in memory. This makes them the most reliable vehicle for procedural changes. Change the runbook, and the next trigger follows the new procedure exactly.
-
-*Example: `RUNBOOK_EMAIL_DIGEST.md`*
-- Triggered daily at 08:00 AM Central
-- Step 1: Fetch today's inbox via `gmail_api.py` (deterministic — script, not LLM)
-- Step 2: Check each sender against contacts (script)
-- Step 3: LLM composes a digest from the results (judgment — LLM earns its keep here)
-- Step 4: Send email (pre-approved standing action — no per-message confirmation)
-
-### 6.2 Scripts: Deterministic Tools for the Agent
-
-| Operation type | Owner | Why |
+| Layer | Location | Role |
 |---|---|---|
-| *When* to act | `check-todos.sh` (bash) | Deterministic; zero tokens |
-| *How* to move/transform data | `scripts/*.py` (Python) | Deterministic; no LLM drift |
-| *What* to say / *whether* to act | LLM | Requires judgment |
+| Cron | Host crontab | Decides when. Promotes READY items. Sends approved outputs. |
+| Scripts | `scripts/*.py`, `scripts/*.sh` | Does deterministic work: fetch, transform, count, route, send API calls. |
+| Runbooks | `agent/runbooks/RUNBOOK_*.md` | Tells the agent which scripts to call, in what order, with what arguments, and what to do with the output. |
 
-Scripts are essentially **registered tools** for the agent — like function-calling in an API context, but running deterministically inside the sandbox. The RUNBOOK tells the agent which tool to call and what to do with the output.
+The LLM never decides when. The cron scripts never decide what to say. Scripts never decide what action to take — they execute the action deterministically and return results.
 
-Key scripts in the worked example:
-- `gmail_api.py` — search, read, and send email via Gmail API (stdlib-only, no pip)
-- `contacts_api.py` — search and create contacts via Google People API (stdlib-only)
-- `sync-track-sheets.py` — reads master Google Sheet, routes rows, writes counts JSON
-- `notify.py` — calls the LLM API directly (for email composition), writes outbox JSON
+### 6.2 Runbooks: Procedures the Agent Follows
 
-### 6.3 Slack Integration
-- Create a Slack app at api.slack.com/apps with **Socket Mode** enabled
-- Required bot scopes: `channels:history`, `chat:write`, `users:read`, etc. (**do not add `assistant:write`**)
-- `botToken` and `appToken` go into `openclaw.json`
-- Multiple agents on one Slack app: use `bindings` to route specific channels to specific agents
-- One agent marked `"default": true` handles all DMs and unrouted messages
+A runbook is a markdown file in the agent's `runbooks/` directory. It gives step-by-step instructions for a specific recurring task and is read **fresh from disk on every trigger** — not held in session memory. This makes runbooks the most reliable vehicle for procedural changes: edit the runbook, and the very next trigger follows the new procedure exactly.
 
-**Outbound (agent-initiated) posts:** Agents can reply within active sessions, but cannot initiate posts to a channel when no session is active. The **slack-outbox pattern** handles this:
-- Agent writes JSON to `shared/slack-outbox/`
-- `send-slack-posts.sh` (cron every 5 min) posts and archives
-- Suitable for automated overnight summaries, scheduled notifications
+**The three-file pattern for any new recurring duty:**
+1. One line in `IDENTITY.md` — what the duty is and its trigger
+2. One runbook file `runbooks/RUNBOOK_X.md` — how to execute it step by step
+3. One line in `CALENDAR.md` — when to trigger it (read by bash, not the LLM)
 
-### 6.4 Google/Gmail Integration
-Two approaches, and why we moved from one to the other:
+**Example: RUNBOOK_EMAIL_DIGEST.md**
+- Triggered: daily at 08:00 AM Central (via CALENDAR.md → check-todos.sh → HEARTBEAT.md)
+- Step 1: Read `PATHS.md` to confirm all file paths
+- Step 2: Run `scripts/gmail_api.py --query "in:inbox after:yesterday"` → returns JSON list of messages
+- Step 3: Run `scripts/contacts_api.py --lookup` on each sender → identifies known contacts
+- Step 4: LLM composes digest from the results, formats for email
+- Step 5: Write draft to outbox (pending approval) or send directly per standing authorization
 
-| Tool | API used | Problem |
-|---|---|---|
-| `gog` CLI | `threads.list` | Returns first message of thread; ignores `in:sent` filter |
-| Direct API via `urllib` | `messages.list` | Correctly honors all Gmail query operators |
+Steps 1–3 are deterministic. Step 4 is where the LLM earns its keep. Step 5 follows the outbox pattern.
 
-Current approach: `gsuite-mcp` handles OAuth (browser flow → writes `token.json`); `gmail_api.py` and `contacts_api.py` read that token directly. No third-party dependencies, no keyring daemon.
+### 6.3 Scripts: Deterministic Tools for the Agent
 
-Sandbox bind mounts needed:
-```
-~/.local/share/gsuite-mcp  →  /tmp/.local/share/gsuite-mcp  (rw — token refresh)
-~/.config/gsuite-mcp       →  /tmp/.config/gsuite-mcp       (ro — credentials)
-/usr/local/bin/gmail-agent →  /scripts                       (ro — agent scripts)
-```
+Scripts are registered tools — the agent calls them via `exec` inside the sandbox, reads the output, and acts on it. They are invoked by runbooks, not by HEARTBEAT.md directly.
 
-### 6.5 OpenClaw-Gmail as a Worked Example
-The `OpenClaw-Gmail` repo is a self-contained, parameterized starting point for anyone who wants a Gmail agent without building from scratch. Key features:
-- Daily email digest (8 AM local)
-- Contact hygiene: harvest sender/recipient addresses from sent mail
-- Writing style learning: analyze sent mail, maintain a style guide
-- Monthly style refresh
-- Inbox triage: action items and urgency flags surfaced to Slack twice daily
-- All placeholder variables in one `sed` substitution
+Key properties of well-designed agent scripts:
+- **No LLM dependency** — the script does not call the model. It fetches, transforms, counts, or routes.
+- **Structured output** — returns JSON the LLM can reliably parse
+- **No third-party dependencies if avoidable** — `gmail_api.py` uses Python stdlib + `urllib` only; no pip install in the sandbox
+- **Single responsibility** — one script, one job. The LLM composes multiple script calls; scripts do not compose each other.
 
-*This repo will be the basis for the hands-on lab.*
+**Example scripts from the worked example:**
+- `gmail_api.py` — search and fetch email via Gmail API; stdlib only
+- `contacts_api.py` — search and create contacts via Google People API; stdlib only
+- `notify.py` — compose and queue outbox email; calls LLM API directly for composition
 
 ---
 
-## Module 7 — Operational Excellence and Lessons Learned *(5 min)*
+## Module 7 — Integrations: Slack and Google *(8 min)*
 
-### 7.1 Daily Operations
-```bash
-# Start (vLLM first, then OpenClaw)
-cd ~/code/spark-ai/qwen3-coder-next && docker compose up -d
-cd ~/code/spark-ai/openclaw && docker compose up -d
+### 7.1 Slack
 
-# Stop
-cd ~/code/spark-ai/openclaw && docker compose down
-cd ~/code/spark-ai/qwen3-coder-next && docker compose down
+**Setup requirements:**
+- Slack app at api.slack.com/apps with Socket Mode enabled
+- Bot scopes: `channels:history`, `chat:write`, `users:read`, `groups:history` (do not add `assistant:write`)
+- Bot token and app token added to `openclaw.json` under `channels.slack`
+- CHANNELS.md updated with the channel ID → agent mapping
 
-# Config change workflow
-docker exec openclaw-gateway cat /home/node/.openclaw/openclaw.json > /tmp/edit.json
-# edit /tmp/edit.json
-docker cp /tmp/edit.json openclaw-gateway:/home/node/.openclaw/openclaw.json
-docker compose restart openclaw-gateway
-```
+**Routing multiple agents:** When you have more than one agent, OpenClaw uses `bindings` in `openclaw.json` to route specific Slack channels to specific agents. One agent is marked `"default": true` and handles all DMs and unrouted messages. CHANNELS.md tracks the mapping in a human-readable form so you are not hunting through JSON when you forget which channel ID is which.
 
-### 7.2 Update Strategy
-Neither script downloads or pulls anything without `--update`:
-- `check_openclaw.sh` — compare running container digest vs. GHCR manifest (HEAD request only)
-- `check_model.sh` — compare local vs. remote HuggingFace commit hash
+**The outbound post problem:** Agents can reply within active Slack sessions. They cannot initiate a post to a channel when no session is active (e.g., a scheduled overnight summary). The **slack-outbox pattern** handles this identically to email:
+- Agent writes JSON to `shared/slack-outbox/` (channel, text, status: "pending")
+- `send-slack-posts.sh` (cron, every 5 minutes) posts via `chat.postMessage` and archives
 
-Before any update: read the release notes, use the embedded upgrade prompt generator to get AI-assisted impact analysis.
+### 7.2 Google — Two Integration Paths
 
-### 7.3 Top Lessons Learned from a Working Deployment
+We use two different tools to reach Google services, for specific reasons:
 
-1. **Use host paths for workspace** — not container-internal paths. Docker resolves bind-mount sources on the host. *(Cost of ignoring: empty sandbox, agent with no identity)*
+| Tool | Best for | Why |
+|---|---|---|
+| `gsuite-mcp` | Gmail, Google Contacts | OAuth browser flow; writes `token.json`; works well with `messages.list` API |
+| `gog` CLI | Google Sheets, Docs, Drive | Better for bulk read/write operations on structured documents |
 
-2. **Disable config writes before connecting Slack** — the first thing to do after onboarding. A single confused agent response can crash the gateway. *(Cost of ignoring: crash loop, potential config corruption)*
+**Why not one tool for everything?** We found that `gog` uses `threads.list` for Gmail, which returns only the first message of a thread and ignores `in:sent` filters — making it unsuitable for inbox and sent-mail workflows. `gsuite-mcp` handles OAuth and token refresh cleanly; our scripts (`gmail_api.py`, `contacts_api.py`) read the token it writes and call the Gmail API directly via `urllib`. For Drive and Sheets, `gog` is more capable and is the better fit. If `gsuite-mcp` gains full Drive/Sheets support in the future, consolidating to one tool would be worth revisiting.
 
-3. **Always sandbox** — never use `tools.exec.host: "gateway"`. Sandbox mode is not a nice-to-have; it is the primary containment layer. *(Cost of ignoring: agent execs run on the host as your user)*
+**Credential handling in the sandbox:** OAuth tokens and credential files must be bind-mounted into the agent's sandbox container. Scripts must be mounted read-only; token files must be writable (for refresh). These mounts are configured in `openclaw.json` per agent.
 
-4. **Session history is the main reliability and latency risk** — not context size. Reset sessions after any important behavioral change, and daily via cron. *(Cost of ignoring: old behavior persists; latency grows unbounded)*
+**Google Cloud setup prerequisites** (students do this before the lab):
+- Create a Google Cloud project
+- Enable the APIs you need: Gmail, People, Drive, Sheets as applicable
+- Configure OAuth consent screen and download credentials JSON
+- Run `gsuite-mcp auth login` (browser flow, one time) to generate `token.json`
 
-5. **Critical rules belong in SOUL.md** — rules in secondary files may never be re-read. *(Cost of ignoring: approval requirements silently stop being enforced)*
+---
 
-6. **Respect the separation of powers** — "LLM does it" is not a plan for data movement, counting, scheduling, or API calls. If it is deterministic, write a script. The principle is established in §2.3; the cost of eroding it compounds silently. *(Cost of ignoring: non-deterministic behavior, token waste, unreproducible failures)*
+## Module 8 — Lessons Learned *(5 min)*
 
-7. **TODO.md vs. CALENDAR.md** — one-shots vs. recurring. An agent that re-schedules recurring tasks in TODO.md will forget after a session reset. *(Cost of ignoring: tasks silently disappear after the next reset)*
+These are not setup checklists or incident reports. Each is a general principle extracted from a specific problem — the kind of lesson that applies beyond the exact incident that generated it.
 
-8. **The outbox pattern for anything with real-world consequences** — email, Slack announcements, external API mutations. Queue, review, send. *(Cost of ignoring: your agent sends email in your name, unsupervised)*
+---
 
-9. **Prompt injection is a real threat for email agents** — malicious email body content can instruct the agent to run commands. Sandbox mode limits the blast radius, but a dedicated low-permission account limits it further.
+**Lesson 1: Agents need a single source of truth for every fact**
 
-10. **Verify, don't assume** — after any configuration or behavioral change, verify the next execution follows the new rule. The LLM does not send acknowledgment receipts.
+The general principle: any fact, rule, or path that appears in more than one file will eventually diverge. The agent sees all 8 system-prompt files simultaneously and will silently blend contradictory signals into inconsistent, unpredictable behavior.
+
+How it manifests:
+- A behavioral rule stated in SOUL.md is also stated, slightly differently, in IDENTITY.md. You refine one and forget the other. The agent begins to behave as if there is a situational exception — because the two versions imply one.
+- A file path is hard-coded in TOOLS.md, a runbook, and HEARTBEAT.md. You rename the scripts directory. You update two of the three. The third silently fails on every trigger until you notice.
+
+The fix: establish canonical ownership for every category of fact. PATHS.md owns all file paths — every other file references it. SOUL.md owns behavioral invariants — IDENTITY.md lists duties but defers to SOUL.md for rules. Write each fact once; reference it everywhere else.
+
+---
+
+**Lesson 2: Agents have no clock and no memory of having acted**
+
+The general principle: a language model has no internal sense of time passing and no persistent memory across session resets. Any scheduling or recurrence logic embedded in the agent's identity files will be checked on every heartbeat, burning tokens on hundreds of no-ops, and will fail silently after a session reset wipes the agent's memory of when it last acted.
+
+How it manifests:
+- HEARTBEAT.md instructs the agent to "check if it's Monday and, if so, send the weekly report." The agent faithfully evaluates this condition 672 times a week, costs tokens on 671 non-Monday heartbeats, and has no reliable way to know whether it already sent the report earlier that day.
+- After a session reset, the agent has no memory of tasks it completed in the previous session. A recurring task scheduled via TODO.md disappears permanently unless it was also added to CALENDAR.md.
+
+The fix: shell owns the clock. CALENDAR.md defines recurring duties in a format that `check-todos.sh` reads and acts on deterministically. TODO.md is for one-shot tasks only. The agent is invoked only when work is ready — it never decides when to act.
+
+---
+
+**Lesson 3: Session history can override freshly-written instructions**
+
+The general principle: the LLM does not treat system-prompt instructions and session-history examples as separate inputs with different authority. When examples of old behavior in the session history outnumber or contradict new instructions in the .md files, the examples often win. Updating a file on disk does not immediately change agent behavior.
+
+How it manifests:
+- You add "always queue email for approval before sending" to SOUL.md. The session history contains 15 examples of the agent sending email directly. The agent continues to send directly — the instruction is outvoted.
+- You update IDENTITY.md to change the Slack output format. The agent's next several responses use the old format. The new format appears only after a session reset.
+
+The fix: any behavioral change requires four steps in sequence — (1) edit the right file, (2) immediately reset the session history, (3) tell the agent explicitly in the first message of the fresh session, (4) verify the next execution. Skipping step 2 is the most common error.
+
+---
+
+**Lesson 4: Agents will try to "help" unless you explicitly bound what help means**
+
+The general principle: language models are trained to be helpful and will extend that helpfulness beyond the scope you intended unless you define boundaries explicitly. When debugging a problem, the agent will not just diagnose — it will also propose fixes, and if it has the tools, it will execute them on things you did not ask it to touch.
+
+How it manifests:
+- You ask the agent to help diagnose a Slack message formatting issue. It reads `openclaw.json`, concludes the channel configuration is wrong, and proposes to update it. One poorly-worded response later and config writes have been attempted on the gateway — potentially crashing it.
+- You ask the agent to review a failing cron script. It fixes the script (correctly), then refactors two adjacent scripts "while it's at it," introducing a subtle bug.
+
+The fix: disable `commands.config` writes immediately after onboarding — before connecting any external channel. Put explicit "diagnose and report; do not attempt fixes without explicit instruction" rules in SOUL.md for infrastructure domains. Run all execution in sandbox so the blast radius of enthusiastic self-correction is contained.
+
+---
+
+**Lesson 5: The outbox is not optional for external communications**
+
+The general principle: the first time an agent sends something on your behalf that you did not intend, you understand viscerally why the outbox pattern exists. Every external communication with real-world consequences — email sent, Slack post published, API mutation made — should go through a queue, human review, and deterministic execution.
+
+How it manifests:
+- An agent drafts and sends a "helpful" follow-up email to a contact who appeared in your inbox in an ambiguous context. The email is well-written and completely wrong for the situation. It cannot be unsent.
+- A scheduled overnight summary task runs, and the agent's interpretation of "summarize" is slightly off. The result goes directly to a team Slack channel at 6am. Forty people see it before you wake up.
+
+The fix: agent writes to `outbox/` with status `pending`. Nothing sends until status is set to `approved` — by a human, or by a designated supervisor agent operating under its own SOUL.md constraints. A deterministic cron script sends approved items and archives everything. The audit trail in `sent/` and `rejected/` gives you a complete record.
+
+---
+
+**Lesson 6: Sandbox is structural, not optional hardening**
+
+The general principle: running agent code inside an ephemeral sandbox container is not a cautious choice for worried operators — it is the architectural guarantee that agent execution cannot affect the host filesystem, persist state between runs, or reach network resources you have not explicitly authorized. It should be enabled before the agent is given any tools. The research community has reached the same conclusion: Shankar et al. (2025) identify containment and runtime monitoring as essential requirements — not optional hardening — for any agent system with tool access. [*cite: "Agentic AI Security: Threats, Defenses, Evaluation, and Open Challenges," arXiv 2510.23883, 2025*]
+
+How it manifests:
+- Gateway-exec mode (the alternative to sandbox) runs agent commands directly on the host as your user. A script with a path bug writes to the wrong location on your host filesystem. There is no container boundary to catch it.
+- A sandbox container misconfigured with an overly broad network bind-mount can reach services beyond its intended scope. Catching this early with iptables DOCKER-USER rules prevents the misconfiguration from becoming an incident.
+
+The fix: set `sandbox.mode = "all"` in `openclaw.json` before connecting any external service. Add iptables DOCKER-USER rules to block sandbox containers from reaching your LAN, Tailscale network, or SSH. Verify with the four-command security checklist before calling the platform ready.
 
 ---
 
 ## What's Next: The Hands-On Lab
 
-The hands-on session (to be developed separately) will use `OpenClaw-Gmail` as the worked example. Participants will:
-1. **Choose their model path** — edit `config.yaml` and `secrets.yaml` for local GPU (vLLM) or cloud API (Anthropic Claude); run `apply-config.sh` and verify the gateway picks it up
-2. Stand up the OpenClaw gateway with security hardening applied
-3. Set up Google Cloud credentials and OAuth via gsuite-mcp
-4. Configure Slack bot integration
-5. Parameterize and deploy the Gmail agent workspace (one `sed` substitution)
-6. Add a cron-driven scheduling entry and observe it fire
-7. Practice the behavior lock-in procedure: edit → reset → verify
-8. Review the email outbox approval workflow end-to-end
+The hands-on session (developed separately as its own document in this repository) uses the materials in this repo directly — no external clones required. The tutorial repo will be organized as:
 
-*Students using cloud Claude and students using a local GPU can work in parallel — the only difference is one line in `config.yaml`.*
+```
+OpenClaw-Tutorial/
+├── gateway/          # platform configuration (docker-compose, config.yaml, scripts)
+│                     # derived from spark-ai; updated and parameterized for tutorial use
+└── agents/           # agent workspace template
+                      # derived from OpenClaw-Gmail; ready to parameterize and deploy
+```
+
+Students clone `OpenClaw-Tutorial`, configure their model path, and work entirely within this single repo. The lecture you just completed provides the full conceptual foundation — the lab is execution.
+
+Students will:
+1. Clone the tutorial repo; choose local or cloud model path; configure `config.yaml` and `secrets.yaml`; run `apply-config.sh`
+2. Apply security hardening and verify the four-command checklist
+3. Complete Google Cloud and OAuth setup (gsuite-mcp) — prerequisite steps done before lab day
+4. Set up the Slack app and configure channel routing
+5. Parameterize the agent workspace (one substitution pass through `agents/`)
+6. Install the host-side crontab and observe `check-todos.sh` promote a calendar entry to READY
+7. Practice the behavioral change lock-in procedure: edit → reset → tell → verify
+8. Walk through an outbox approval cycle end-to-end
+
+*The hands-on lab will be developed as a separate document (`HANDS-ON.md`) in this repository, structured for independent self-paced use or instructor-led delivery. The `gateway/` and `agents/` directories will be populated by harvesting and updating the relevant files from the reference repositories used to develop this curriculum.*
 
 ---
 
 ## Appendix: Key Files Quick Reference
 
-| File | Location | Purpose |
-|---|---|---|
-| `SOUL.md` | `<agent>/` | Hard behavioral invariants; loaded every call |
-| `IDENTITY.md` | `<agent>/` | Who the agent is; Slack contract; loaded every call |
-| `HEARTBEAT.md` | `<agent>/` | Always-on reflexes; loaded every call |
-| `CALENDAR.md` | `<agent>/` | Recurring duties; read by bash, not LLM |
-| `TODO.md` | `<agent>/` | One-shot tasks; written by agent; gitignored |
-| `PATHS.md` | `<agent>/` | Canonical absolute paths; read explicitly |
-| `RUNBOOK_X.md` | `<agent>/runbooks/` | Step-by-step procedures; read at trigger time |
-| `check-todos.sh` | `scripts/` | Bash scheduling engine; run via cron on host |
-| `send-approved-emails.sh` | `scripts/` | Sends human-approved outbox emails |
-| `reset-sessions.sh` | `scripts/` | Archives + truncates large session files daily |
-| `openclaw.json` | Inside gateway container | Live gateway configuration |
-| `config.yaml` | `spark-ai/` | Per-agent model assignments |
-| `secrets.yaml` | `spark-ai/` | API keys; gitignored |
+| File | Location | Auto-loaded? | Purpose |
+|---|---|---|---|
+| `SOUL.md` | `<agent>/` | Yes | Hard behavioral invariants |
+| `IDENTITY.md` | `<agent>/` | Yes | Who the agent is; duty list |
+| `TOOLS.md` | `<agent>/` | Yes | How to call scripts and tools |
+| `USER.md` | `<agent>/` | Yes | User context and preferences |
+| `HEARTBEAT.md` | `<agent>/` | Yes | Always-on reflexes |
+| `BOOTSTRAP.md` | `<agent>/` | Yes | First-run orientation |
+| `MEMORY.md` | `<agent>/` | Yes | Long-term accumulated knowledge |
+| `AGENTS.md` | `<agent>/` | Yes | Sub-agent definitions |
+| `PATHS.md` | `<agent>/` | No — read explicitly | Canonical path registry (single source of truth) |
+| `CHANNELS.md` | `<agent>/` | No — read explicitly | Slack channel → agent routing map |
+| `CALENDAR.md` | `<agent>/` | No — read by bash | Recurring duty schedule |
+| `TODO.md` | `<agent>/` | No — read by agent | One-shot deferred tasks |
+| `RUNBOOK_X.md` | `<agent>/runbooks/` | No — read at trigger | Step-by-step task procedures |
+| `config.yaml` | `gateway/` | N/A | Per-agent model assignments |
+| `secrets.yaml` | `gateway/` | N/A | API keys (gitignored) |
+| `check-todos.sh` | `agents/scripts/` | N/A | Bash scheduling engine (cron) |
+| `send-approved-emails.sh` | `agents/scripts/` | N/A | Sends human-approved outbox emails |
+| `reset-sessions.sh` | `agents/scripts/` | N/A | Daily session archive and truncate |
 
 ---
 
-*Outline version: 2026-03-18 rev 2. Developed from spark-ai, spark-ai-agents, and OpenClaw-Gmail repositories.*
+*Outline version: 2026-03-18 rev 4.*
+
+---
+
+## References
+
+[1] Zverev et al., "Can LLMs Separate Instructions From Data? — Formalizing and Testing Instruction Hierarchy," ICLR 2025. *(Cited in §2.1 — prompt injection as a structural vulnerability in current LLM architectures)*
+
+[2] Masterman, T.; Besen, S.; Sawtell, M.; and Chao, A., "The Landscape of Emerging AI Agent Architectures for Reasoning, Planning, and Tool Calling: A Survey," arXiv:2404.11584, 2024. *(Cited in §2.3 — reliability-critical applications systematically require more deterministic orchestration)*
+
+[3] Hong, S.; Zhuge, M.; et al., "MetaGPT: Meta Programming for A Multi-Agent Collaborative Framework," ICLR 2024 (oral). arXiv:2308.00352. *(Cited in §2.3 — SOPs encoded in code reduce cascading hallucinations from naively chained LLMs)*
+
+[4] Qiu, L.; Ye, Y.; Gao, Z.; et al., "Blueprint First, Model Second: A Framework for Deterministic LLM Workflow," arXiv:2508.02721, 2025. *(Cited in §2.3 — deterministic orchestration engine + bounded LLM sub-tasks = verifiable, auditable agent behavior)*
+
+[5] Kapoor et al., "The 2025 AI Agent Index: Documenting Technical and Safety Features of Deployed Agentic AI Systems," MIT / arXiv:2602.17753, 2025. *(Cited in §2.4 — majority of deployed agents document no sandboxing or containment mechanisms)*
+
+[6] Shankar et al., "Agentic AI Security: Threats, Defenses, Evaluation, and Open Challenges," arXiv:2510.23883, 2025. *(Cited in Lesson 6 — containment and runtime monitoring are essential requirements, not optional hardening)*
+
+[7] Yomtov, O. (Koi Security), "ClawHavoc: Large-Scale Poisoning Campaign Targeting the OpenClaw Skill Market," February 2026. Covered by Trend Micro, CyberPress, SecurityWeek, and others. *(Cited in §1.3 and §2.1 — real-world consequence of missing supply-chain discipline: ~20% of ClawHub registry compromised)*
+
+[8] SecurityScorecard STRIKE Team, "ClawJacked: WebSocket Hijack Vulnerability in OpenClaw Gateways Exposed to Internet," February 2026 (CVE-2026-25253). Covered by The Hacker News. *(Cited in §1.3 and §2.4 — 135,000+ publicly exposed instances; 15,000+ vulnerable to RCE; Tailscale binding is the direct mitigation)*
+
+*[TODO: Hugo — locate the specific talk or paper making the quantitative argument for code/LLM separation in agent scheduling. First name Hugo, context likely a 2024 major ML conference (NeurIPS or ICML). Confirm last name and add citation in §2.3. Note: not among the references in Qiu et al. 2025 — may be a conference talk rather than a paper.]*
