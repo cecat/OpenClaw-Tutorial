@@ -1,0 +1,5 @@
+# Cloned reference repositories — do not commit
+spark-ai/
+spark-ai-agents/
+OpenClaw-Gmail/
+.DS_Store
