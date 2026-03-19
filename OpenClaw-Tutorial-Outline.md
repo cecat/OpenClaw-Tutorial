@@ -302,7 +302,7 @@ This repository is structured so that you can implement OpenClaw and an initial 
 OpenClaw-Tutorial/               ← your private repo
 ├── gateway/                     ← platform config
 │   ├── docker-compose files
-│   ├── config.yaml              # per-agent model assignments
+│   ├── config.yaml              # per-agent model assignments + Slack channel bindings
 │   ├── secrets.yaml             # gitignored — API keys
 │   └── apply-config.sh
 ├── shared/                      ← runtime state shared across all agents
@@ -421,7 +421,7 @@ More reliably than secondary files, but not unconditionally. This can be surpris
 
 **Instructions vs. examples.** OpenClaw rebuilds the system prompt from the 8 files on every call — but it *also* sends the full session history (the accumulated back-and-forth since the last session reset). When instruction text and behavioral examples in the history conflict, examples often win. An agent with many examples of old behavior in its session history may not immediately adopt a newly-written rule, even one enshrined in SOUL.md.
 
-**What this means for updates.** Updating a file on disk does not guarantee the agent immediately adopts the new behavior. Any behavioral change requires four steps: (1) edit the right file, (2) reset the session to clear counter-examples from history, (3) explicitly tell the agent about the change in the first message of the new session, (4) verify the next execution follows the new rule.
+**What this means for updates.** Updating a file on disk does not guarantee the agent immediately adopts the new behavior. Any behavioral change requires four steps: (1) edit the right file, (2) reset the session to clear counter-examples from history, (3) explicitly tell the agent about the change in the first message of the new session, (4) verify the next execution follows the new rule. `reset-session.sh` (covered in §4.6) automates step 2 and logs the reason for the reset.
 
 **Reliability tiers:**
 
@@ -444,6 +444,14 @@ A **session** in OpenClaw is a conversation history file (`.jsonl`) stored in th
 **The latency dimension:** LLM generation runs sequentially at roughly 50–100 tps on a capable local GPU. Prefill — processing the entire input, including session history — runs in parallel and is much faster, typically 1–3 seconds for a typical context. But session history grows without a hard cap, while the system prompt is bounded at 150K characters. A long-running session eventually makes every interaction noticeably slower.
 
 **Our practice:** We reset sessions nightly via `reset-sessions.sh` (run at 3 AM via cron). The script archives any session file larger than 512 KB and truncates it to zero; the agent starts fresh from its Sacred Eight files on the next heartbeat. This also reinforces the scheduling architecture: the agent cannot rely on remembering what it did in a previous session — any state that must survive a reset must live in the Sacred Eight files, `PATHS.md`, `CALENDAR.md`, or the shared filesystem.
+
+**Resetting after a behavioral change:** When you edit an agent's `.md` files and need the agent to adopt the new behavior immediately (not wait for the 3 AM nightly reset), use `reset-session.sh`:
+
+```bash
+bash scripts/reset-session.sh <agent-id> --reason "Updated EMAIL.md rate limits"
+```
+
+The script archives all session files for the named agent, truncates them to zero, and logs the reset with the agent ID, timestamp, and reason to `shared/sessions/reset.log`. This is the second step of the four-step behavioral change procedure (edit → reset → tell → verify); the reason log provides an audit trail of when and why each reset happened.
 
 **Timing matters:** Schedule your nightly reset at least one to two hours before your earliest daily scheduled task fires. A freshly-reset agent needs one heartbeat to re-establish its session context; giving it time to do this before any CALENDAR.md entries come due prevents a race condition where the agent executes a task with a thin or empty session.
 
@@ -501,7 +509,7 @@ The scheduling engine rests on two agent-specific files in the workspace directo
 
 **A note on CALENDAR.md and agent modification:** `CALENDAR.md` lives in the agent's workspace, which OpenClaw mounts read-write. There is no technical enforcement preventing the agent from modifying it — the prohibition is a behavioral invariant encoded in `SOUL.md`. If you want your agent to be able to add or remove calendar entries, you can permit this by updating the relevant `SOUL.md` rule. The current convention (human-only authorship) is our implementation choice, not an OpenClaw constraint.
 
-**Logging:** `check-todos.sh` appends a record to `shared/todos/todo.log` each time it promotes an entry to READY. The agent appends a completion record to the same log when it executes a READY task and removes the line from `TODO.md`. The log is append-only and provides a full chronological history of what was scheduled, when it fired, and when it completed.
+**Logging:** `check-todos.sh` appends a record to `shared/todos/todo.log` each time it promotes an entry to READY and each time it removes a COMPLETED line. The agent appends a completion record to the same log when it executes a READY task and marks the line COMPLETED in `TODO.md`; `check-todos.sh` removes COMPLETED lines on its next 5-minute run. The log is append-only and provides a full chronological history of what was scheduled, when it fired, and when it completed.
 
 **File formats:**
 
@@ -528,6 +536,8 @@ Every 5 minutes, `check-todos.sh` (run by cron) inspects both files and promotes
 
 ```
 check-todos.sh  (cron, every 5 min, zero tokens)
+  ├─ Removes COMPLETED lines from TODO.md, logging each removal to todo.log
+  │
   ├─ Reads CALENDAR.md
   │    For each entry: is it due today/now AND not already fired today?
   │    (checks shared/todos/calendar-state.json for last-fired timestamp)
@@ -542,11 +552,12 @@ OpenClaw heartbeat  (every 15 min, tokens only when READY lines exist)
   └─ Agent reads TODO.md, looks for lines beginning with READY
        ├─ None found → replies HEARTBEAT_OK  (fast, minimal tokens)
        └─ READY line found → executes the task per its runbook
-            → removes the completed line from TODO.md
+            → marks the line COMPLETED in TODO.md (deterministic sed replace)
             → logs the completed task to shared/todos/todo.log
+            → check-todos.sh removes the COMPLETED line on its next 5-min run
 ```
 
-`CALENDAR.md` is the human-authored source of recurring duties — it is never modified by scripts or agents. `TODO.md` is the runtime queue: `check-todos.sh` promotes entries into it, the agent executes them and removes completed lines. *(Agent-side line removal is flagged for improvement — see FIXES.md.)*
+`CALENDAR.md` is the human-authored source of recurring duties — it is never modified by scripts or agents. `TODO.md` is the runtime queue; the full line lifecycle is: pending → READY (promoted by check-todos.sh) → COMPLETED (marked by agent) → removed (by check-todos.sh on next run), or FAILED (left in place for human review). Removal is deterministic and handled by the script — the LLM marks completion but does not delete lines.
 
 **State Tracking: calendar-state.json**
 
@@ -641,7 +652,7 @@ The outbox/review/send pattern is our third scaffolding component, built on top 
 
 The email outbox is our reference implementation of the pattern. The drafting agent writes a JSON file to a shared queue; the reviewing agent (or human) approves or rejects by updating that file; a cron script sends approved drafts and archives the results. No LLM is involved in the send step.
 
-**A note on human vs. agent review and file manipulation:** In our implementation, when a human is the reviewer they communicate their decision to the drafting agent (via Slack or a direct message), and the drafting agent performs the file updates — it sets the status field and moves the file to `rejected/` if applicable. The reviewing agent (main) is the only agent that should manipulate these files programmatically. *(See FIXES.md for a proposed improvement: making the reviewing agent the sole authority for outbox file manipulation, with the human's decision relayed through it.)*
+**A note on human vs. agent review and file manipulation:** The reviewing agent (main) is the sole entity that writes to, moves, or deletes files in `outbox/` and `rejected/`. This applies to human-directed decisions as well: when a human wants to approve or reject an email, they communicate their decision to main via Slack DM, and main performs the file operation. This keeps the audit trail consistent (all file state changes come from one actor) and prevents a human from accidentally corrupting a JSON file with a manual edit. If main finds an outbox file that appears to have been edited manually, it flags the file and holds it for inspection rather than processing it.
 
 **JSON format** (written by the drafting agent as an atomic `.tmp` rename):
 ```json
@@ -735,7 +746,18 @@ Slack is connected to the **OpenClaw gateway** — not directly to individual ag
 - Register each Slack channel the bot should respond in (by channel ID) under `channels.slack.channels`. OpenClaw will ignore messages from unlisted channels.
 - Use `bindings` to route specific channels to specific agents. One agent is marked `"default": true` and handles all DMs and unrouted messages.
 
-**CHANNELS.md** — because channel IDs (e.g., `C08A1BCDE`) are not human-readable, we maintain a `CHANNELS.md` file in the workspace root mapping channel IDs to agent names and purposes. This is our implementation choice; currently it is a human-edited markdown file. *(See FIXES.md for a proposed improvement: move this mapping into `config.yaml` so it can be managed via `apply-config.sh` alongside model assignments.)*
+**Channel routing in `config.yaml`** — Slack channel bindings are managed in `config.yaml` alongside model assignments, using the same `apply-config.sh` workflow. Each entry maps a Slack channel ID to an agent and includes a human-readable name for reference. `apply-config.sh` rebuilds the `bindings[]` array in `openclaw.json` from this list on every apply. The default agent (marked `"default": true` in `openclaw.json`) handles all DMs and any channel not explicitly listed — it does not need an entry. `CHANNELS.md` in the workspace provides a quick-reference table derived from this config; the authoritative source is `config.yaml`.
+
+```yaml
+# config.yaml — channel routing section
+channels:
+  - id: C09KGGMS116
+    name: "#tpc-channel"
+    agent: admin-agent
+  - id: C0AJ1EL2KJ5
+    name: "#testing"
+    agent: admin-agent
+```
 
 **The outbound post problem:** Agents can reply within active Slack sessions. They cannot initiate a post when no session is active (e.g., a scheduled overnight report). The slack-outbox pattern handles this: the agent writes JSON to `shared/slack-outbox/` and `send-slack-posts.sh` (cron, every 5 minutes) posts via the Slack `chat.postMessage` API and archives to `slack-sent/`.
 
@@ -891,15 +913,16 @@ Students will:
 | `CALENDAR.md` | `<agent>/` | No — read by bash | Recurring duty schedule |
 | `TODO.md` | `<agent>/` | No — read by agent | One-shot deferred tasks |
 | `RUNBOOK_X.md` | `<agent>/runbooks/` | No — read at trigger | Step-by-step task procedures |
-| `config.yaml` | `gateway/` | N/A | Per-agent model assignments |
+| `config.yaml` | `gateway/` | N/A | Per-agent model assignments and Slack channel bindings |
 | `secrets.yaml` | `gateway/` | N/A | API keys (gitignored) |
-| `check-todos.sh` | `agents/scripts/` | N/A | Bash scheduling engine (cron) |
+| `check-todos.sh` | `agents/scripts/` | N/A | Bash scheduling engine (cron); promotes READY entries; removes COMPLETED lines |
 | `send-approved-emails.sh` | `agents/scripts/` | N/A | Sends human-approved outbox emails |
-| `reset-sessions.sh` | `agents/scripts/` | N/A | Daily session archive and truncate |
+| `reset-sessions.sh` | `agents/scripts/` | N/A | Daily session archive and truncate (nightly cron) |
+| `reset-session.sh` | `agents/scripts/` | N/A | Manual single-agent session reset with reason logging (behavioral changes) |
 
 ---
 
-*Outline version: 2026-03-18 rev 7.*
+*Outline version: 2026-03-19 rev 8.*
 
 ---
 
