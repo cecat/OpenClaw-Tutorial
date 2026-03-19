@@ -1,7 +1,4 @@
 # Getting Started with OpenClaw: A Safety-First Approach
-## Tutorial Outline — 90-Minute Lecture
-
----
 
 ## Contents
 
