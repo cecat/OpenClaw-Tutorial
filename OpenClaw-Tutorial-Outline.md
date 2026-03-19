@@ -61,19 +61,6 @@ A central element of containment is the **sandbox**. When an agent executes a sc
 
 *The full architecture diagram and setup walkthrough are in Module 3.*
 
-### 1.6 What This Talk Covers
-
-1. The design charter: safety, containment, alignment, and separation of responsibilities
-2. Platform architecture and choosing your model
-3. Agent identity: the files that define each agent's persona, responsibilities, and operating procedures
-4. Scheduling: why the shell owns the clock
-5. Separation of responsibilities: runbooks, scripts, and cron
-6. Layered oversight: the outbox and review pattern
-7. Integrations: Slack and Google
-8. Lessons learned from a working deployment
-
-*The hands-on lab (a separate session) puts this into practice using `OpenClaw-Gmail` as the worked example.*
-
 ---
 
 ## Module 2 — The Design Charter *(15 min)*
@@ -215,11 +202,11 @@ Reviewer rejects  → updates JSON, moves file to rejected/ (includes rejected_r
 Cron script sends approved drafts → moves to sent/; logs to send-email.log
 ```
 
-Approved drafts move from `outbox/` to `sent/`. Rejected drafts move to `rejected/` with a `rejected_reason` field written by the reviewer, and a Slack DM is sent to the operator explaining the rejection. The `send-email.log` provides a timestamped delivery record. The complete mechanism — JSON format, review criteria, directory structure, logging — is covered in Module 7.
+Approved drafts move from `outbox/` to `sent/`. Rejected drafts are updated with `status: "rejected"` and a `rejected_reason` field, then moved to `rejected/` — the reason is written into the JSON file itself, not the log. The `send-email.log` records delivery confirmations only (timestamps, recipients, send status). A Slack DM notifies the operator of any rejection. The complete mechanism — JSON format, review criteria, directory structure, logging — is covered in Module 7.
 
-In our system we have three agents: a supervisory agent (reviewer as needed), a clerical agent (currnetly tracking submissions to web forms and creating reports on submissions to notify humans via Slack and email), and a Gmail assist agent (work in progress to help manage email, calendar, tasks).
+In our deployment we have three agents: **main** (supervisor — reviews outbox drafts, handles administrative queries), **admin-agent** (clerical — tracks form submissions, produces reports, sends notifications via Slack and email), and **gmail-agent** (Gmail assistant — reads email, drafts replies, manages contacts). All examples in this outline and in the hands-on lab use this three-agent setup.
 
-**The supervisory agent (reviewer) is a design choice, not a fixed role.** In our current deployment we use two tiers:
+**The supervisory agent (reviewer) is a design choice, not a fixed role.** In our current deployment we use human review for some things and agent review for others:
 
 - **Agent review** for outbound email from our clerical agent, whose routine reporting uses template-based messages with light natural language fills. The review criteria — appropriate language, no more than a handful of emails per day to any recipient, recipient must be in the contacts database — are defined in `EMAIL.md` and applied by the supervisory agent during its heartbeat. The supervisory agent approves or rejects each queued draft (fully logged for diagnostics).
 
@@ -262,10 +249,10 @@ In our deployment we use a local GPU for some agents and a cloud API for others 
 
 | Path | Hardware requirement | Model examples | Characteristic |
 |---|---|---|---|
-| Local GPU | Machine with dedicated GPU and sufficient memory (e.g., NVIDIA DGX Spark GB10, high-end workstation, Mac with Apple Silicon M-series) | Qwen3-Coder-Next-FP8 via vLLM | Low per-token cost; throughput depends on hardware; typically <100 tps |
+| Local GPU | Machine with dedicated GPU and sufficient memory (e.g., NVIDIA DGX Spark GB10, high-end workstation, Mac with Apple Silicon M-series (and large memory)) | Qwen3-Coder-Next-FP8 via vLLM | Low per-token cost; throughput depends on hardware; typically <100 tps |
 | Cloud API | Any Linux host (no GPU required) | Anthropic Claude (claude-sonnet-4-6, claude-haiku-4-5) | Pay-per-token; consistently fast; easier setup |
 
-**On running a local model:** The key constraint is memory, not just GPU. A 32 GB unified memory machine (e.g., M-series Mac) can run smaller quantized models but will see lower throughput and may struggle with large context windows. Throughput matters for scheduled tasks — a 50-tps model can produce a 500-token email digest in 10 seconds; a 5-tps model takes 100 seconds. If you are not already confident your hardware can run a capable model, the cloud API path removes this variable entirely and lets you focus on the agent architecture, which is the point of this tutorial.
+**On running a local model:** The key constraint is memory, not just GPU. A 32 GB unified memory machine (e.g., M-series Mac) can run smaller quantized models but will see lower throughput and may struggle with large context windows. Throughput matters for scheduled tasks — a 50-tps model can produce a 500-token email digest in 10 seconds; a 5-tps model takes 100 seconds. Anything below about 50 tps is not really viable.  Your chats will feel like you are talking over a 300 baud modem. If you are not already confident your hardware can run a capable model, the cloud API path removes this variable entirely and lets you focus on the agent architecture, which is the point of this tutorial.
 
 **Our recommendation for the tutorial:** Use the cloud API (e.g., Anthropic Claude) unless you already have local model inference working. The architecture is identical — the only difference is one line in `config.yaml`.
 
@@ -313,29 +300,34 @@ This repository is structured so that you can implement OpenClaw and an initial 
 
 ```
 OpenClaw-Tutorial/               ← your private repo
-├── gateway/                     ← platform config (from spark-ai)
+├── gateway/                     ← platform config
 │   ├── docker-compose files
-│   ├── config.yaml              # model assignments — edit this
+│   ├── config.yaml              # per-agent model assignments
 │   ├── secrets.yaml             # gitignored — API keys
 │   └── apply-config.sh
-├── main/                        ← supervisory agent workspace
-│   ├── SOUL.md
+├── shared/                      ← runtime state shared across all agents
+│   ├── outbox/ sent/ rejected/  # email review queue
+│   ├── slack-outbox/ slack-sent/
+│   └── todos/                   # calendar-state.json, todo.log
+├── main/                        ← supervisory agent (full file listing shown here)
+│   ├── SOUL.md                  # Sacred Eight
 │   ├── IDENTITY.md
 │   ├── TOOLS.md
-│   ├── EMAIL.md                 # outbox review criteria
-│   ├── HEARTBEAT.md             # includes outbox review step
-│   ├── ...                      # other Sacred Eight files
+│   ├── USER.md
+│   ├── HEARTBEAT.md
+│   ├── BOOTSTRAP.md
+│   ├── MEMORY.md
+│   ├── AGENTS.md
+│   ├── EMAIL.md                 # outbox review criteria (not auto-loaded)
+│   ├── PATHS.md                 # canonical path registry
+│   ├── CHANNELS.md              # Slack channel → agent routing
 │   └── runbooks/
-└── gmail-agent/                 ← Gmail assist agent workspace (from OpenClaw-Gmail)
-    ├── SOUL.md
-    ├── IDENTITY.md
-    ├── TOOLS.md
-    ├── ...                      # Sacred Eight files + CALENDAR.md, PATHS.md, etc.
-    ├── runbooks/
+├── admin-agent/                 ← clerical agent (same structure as main)
+└── gmail-agent/                 ← Gmail assist agent (same structure + scripts/)
     └── scripts/                 # gmail_api.py, contacts_api.py, etc.
 ```
 
-The `main` agent is the supervisor: it reviews outbox drafts from `gmail-agent` and handles administrative tasks. `gmail-agent` handles email reading, drafting, and contacts. This two-agent setup is the minimum needed to demonstrate the full review workflow end-to-end.
+`admin-agent` and `gmail-agent` have the same Sacred Eight files and supporting files as `main`. Only `gmail-agent` adds a `scripts/` directory for deterministic API tools.
 
 ### 3.5 Security Hardening Checklist
 
@@ -433,12 +425,34 @@ More reliably than secondary files, but not unconditionally. This can be surpris
 
 **Reliability tiers:**
 
+*Session management and daily session reset are covered in §4.6 immediately below.*
+
 | Source | When agent sees it | Reliability |
 |---|---|---|
 | One of the 8 auto-loaded files | Every inference call | High — with session reset after changes |
 | Non-auto-loaded file | Only when agent explicitly reads it | Indeterminate |
 | A runbook (read at trigger time) | Fresh from disk on every trigger | Most reliable for procedural changes |
 | Session history examples | Every call until session reset | Works against you after behavioral changes |
+
+
+### 4.6 Session Management and Daily Reset
+
+A **session** in OpenClaw is a conversation history file (`.jsonl`) stored in the gateway's persistent Docker volume. Each agent maintains its own session; different Slack channels and the heartbeat each have separate sub-sessions within it. Every exchange — messages, responses, tool calls, results — is appended to this file, and OpenClaw replays the entire history on every inference call. Sessions survive gateway restarts.
+
+**Why this matters for agent setup:** The session history the agent has accumulated shapes its behavior just as much as the Sacred Eight files. An agent mid-session may exhibit behavior locked in by earlier examples even after you update its identity files. This is why we reset sessions as a deliberate part of deploying configuration changes (see §4.5).
+
+**The latency dimension:** LLM generation runs sequentially at roughly 50–100 tps on a capable local GPU. Prefill — processing the entire input, including session history — runs in parallel and is much faster, typically 1–3 seconds for a typical context. But session history grows without a hard cap, while the system prompt is bounded at 150K characters. A long-running session eventually makes every interaction noticeably slower.
+
+**Our practice:** We reset sessions nightly via `reset-sessions.sh` (run at 3 AM via cron). The script archives any session file larger than 512 KB and truncates it to zero; the agent starts fresh from its Sacred Eight files on the next heartbeat. This also reinforces the scheduling architecture: the agent cannot rely on remembering what it did in a previous session — any state that must survive a reset must live in the Sacred Eight files, `PATHS.md`, `CALENDAR.md`, or the shared filesystem.
+
+**Timing matters:** Schedule your nightly reset at least one to two hours before your earliest daily scheduled task fires. A freshly-reset agent needs one heartbeat to re-establish its session context; giving it time to do this before any CALENDAR.md entries come due prevents a race condition where the agent executes a task with a thin or empty session.
+
+```bash
+# Session management scripts (run via cron on host — see §5.5 for full crontab)
+*/5  * * * *  monitor-sessions.sh   # log .jsonl sizes; alert if growing large
+0    3 * * *  reset-sessions.sh     # archive >512KB sessions; truncate to zero
+*/30 * * * *  seed-sessions.sh      # restore missing heartbeat session files
+```
 
 ---
 
@@ -448,7 +462,8 @@ More reliably than secondary files, but not unconditionally. This can be surpris
 
 > **The decision of when to act is always owned by deterministic code. The act of doing the work is owned by the LLM. These two responsibilities must never be mixed.**
 
-An LLM has no clock. It has no reliable memory of having acted in a previous session. If you ask it to decide whether it is time to run a task, it will reason through that question every time it runs — and it will sometimes be wrong.
+Here we describe one of three useful ways that we have extended the utility of OpenClaw's base capabilities: Scheduling.  Why is this needed? An LLM has no clock. It has no reliable memory of having acted in a previous session. If you ask it to decide whether it is time to run a task, it will reason through that question every time it runs — and it will sometimes be wrong.
+
 
 ### 5.2 The Token-Waste Problem
 
@@ -482,7 +497,15 @@ Beyond token cost: the agent must remember whether it already ran the task today
 
 ### 5.4 The Scheduling Engine: check-todos.sh
 
+The scheduling engine rests on two agent-specific files in the workspace directory — `TODO.md` and `CALENDAR.md` — and a cron script (`check-todos.sh`) that bridges between them. Typically a human authors `CALENDAR.md` and the agent manages its own `TODO.md`, though allowing the agent to co-manage `CALENDAR.md` is possible (see below).
+
+**A note on CALENDAR.md and agent modification:** `CALENDAR.md` lives in the agent's workspace, which OpenClaw mounts read-write. There is no technical enforcement preventing the agent from modifying it — the prohibition is a behavioral invariant encoded in `SOUL.md`. If you want your agent to be able to add or remove calendar entries, you can permit this by updating the relevant `SOUL.md` rule. The current convention (human-only authorship) is our implementation choice, not an OpenClaw constraint.
+
+**Logging:** `check-todos.sh` appends a record to `shared/todos/todo.log` each time it promotes an entry to READY. The agent appends a completion record to the same log when it executes a READY task and removes the line from `TODO.md`. The log is append-only and provides a full chronological history of what was scheduled, when it fired, and when it completed.
+
 **File formats:**
+
+`TODO.md` and `CALENDAR.md` use simple pipe-delimited notation specifying the date/time and the task (which typically references a runbook for its execution instructions).
 
 ```
 # CALENDAR.md — human-authored, never modified by scripts or agents
@@ -500,6 +523,8 @@ READY | 2026-04-07T14:00:00Z | Send notifications per runbooks/RUNBOOK_NOTIFICAT
 ```
 
 **The execution flow — precisely:**
+
+Every 5 minutes, `check-todos.sh` (run by cron) inspects both files and promotes any due items to `READY` status in `TODO.md`. The heartbeat then picks up READY items at its next 15-minute interval. CALENDAR.md is never modified by this process — it is the permanent human-authored record of recurring duties.
 
 ```
 check-todos.sh  (cron, every 5 min, zero tokens)
@@ -521,18 +546,13 @@ OpenClaw heartbeat  (every 15 min, tokens only when READY lines exist)
             → logs the completed task to shared/todos/todo.log
 ```
 
-CALENDAR.md is never touched by the script or the agent — it is the human-authored source of recurring duties. TODO.md is the runtime queue: the script promotes entries into it, the agent executes and removes them. *(Note: the agent removing its own completed lines is an area flagged for improvement — see FIXES.md.)*
+`CALENDAR.md` is the human-authored source of recurring duties — it is never modified by scripts or agents. `TODO.md` is the runtime queue: `check-todos.sh` promotes entries into it, the agent executes them and removes completed lines. *(Agent-side line removal is flagged for improvement — see FIXES.md.)*
 
-**State tracking:** `check-todos.sh` records last-fired timestamps in `shared/todos/calendar-state.json` on the host — not in the agent's memory. Deduplication survives session resets.
+**State Tracking: calendar-state.json**
 
-### 5.5 Session Management
+`check-todos.sh` needs to know whether a given `CALENDAR.md` entry has already fired today — otherwise it would re-promote recurring items on every 5-minute run. It solves this with a small JSON file on the host: `shared/todos/calendar-state.json`. Each time a recurring entry fires, the script records the entry's key and the current timestamp in this file. On subsequent runs it checks the file before promoting — if the entry already fired within its scheduling window (e.g., today for a DAILY entry, or this week for a MON entry), it is skipped. Because this state lives on the host filesystem rather than in the agent's memory, it survives session resets. An agent that loses its session history at 3 AM will still not re-fire its Monday report on Tuesday, because `calendar-state.json` knows it already ran.
 
-OpenClaw replays the full conversation history on every inference call. As session history grows, latency grows — not because of context size per se, but because of unbounded growth in the history file.
-
-**Prefill vs. generation** — a nuance worth understanding: LLM generation (output tokens) runs sequentially at perhaps 50-100 tps on a reasonably capable local GPU. Prefill (processing the input — system prompt + history) runs in parallel across all input tokens and is much faster: 10,000 tokens prefill in ~1–3 seconds. Session history is the real latency risk because it grows without a hard cap, while the system prompt is bounded at 150K characters.
-
-
-### 5.6 The Host-Side Crontab
+### 5.5 The Host-Side Crontab
 
 All scheduling and session management runs on the host as cron jobs — never inside any container. Crontab supports comment lines, so the entries are grouped by purpose:
 
@@ -561,6 +581,8 @@ Nothing in this crontab requires the LLM to be running. The scheduling engine, o
 ---
 
 ## Module 6 — Separation of Responsibilities: Runbooks, Scripts, and Cron *(10 min)*
+
+Module 5 established that the shell owns the clock. This module establishes what happens below the LLM when the clock fires: a layered system of runbooks, deterministic scripts, and cron that handles everything procedural so the model never has to. These three layers, combined with the scheduling layer, are the scaffolding that makes our deployment reliable and maintainable. Each has a distinct role and a distinct location in the repository; this module maps the architecture to implementation.
 
 ### 6.1 The Three-Layer Pattern in Practice
 
@@ -613,110 +635,136 @@ Key properties of well-designed agent scripts:
 
 ## Module 7 — Layered Oversight: The Outbox and Review Pattern *(8 min)*
 
-### 7.1 Why a Dedicated Review Layer?
+The outbox/review/send pattern is our third scaffolding component, built on top of scheduling (Module 5) and deterministic scripts (Module 6). It is the mechanism by which the deployment earns the right to operate with progressively less human involvement. We start with review at every consequential outbound action. As behavior proves consistent and review criteria become well-defined, we delegate the reviewer role from human → supervisor agent → lighter model. The mechanism — the outbox directory, the JSON format, the cron-based sender — stays constant at every stage of that progression.
 
-The outbox/review/send pattern is our third scaffolding component, built on top of both scheduling (Module 5) and deterministic scripts (Module 6). It deserves its own module because it is the primary mechanism by which the deployment earns the right to operate autonomously — and because it touches every outbound channel.
+### 7.1 The Email Outbox — Mechanism and Format
 
-The goal is progressive delegation. We start with review everywhere. As agent behavior proves consistent and the review criteria become well-defined, we promote the reviewer from human → supervisor agent → lighter/cheaper model. The mechanism — the outbox directory, the JSON format, the cron-based sender — stays the same at every stage.
+The email outbox is our reference implementation of the pattern. The drafting agent writes a JSON file to a shared queue; the reviewing agent (or human) approves or rejects by updating that file; a cron script sends approved drafts and archives the results. No LLM is involved in the send step.
 
-### 7.2 The Email Outbox — Mechanism in Detail
+**A note on human vs. agent review and file manipulation:** In our implementation, when a human is the reviewer they communicate their decision to the drafting agent (via Slack or a direct message), and the drafting agent performs the file updates — it sets the status field and moves the file to `rejected/` if applicable. The reviewing agent (main) is the only agent that should manipulate these files programmatically. *(See FIXES.md for a proposed improvement: making the reviewing agent the sole authority for outbox file manipulation, with the human's decision relayed through it.)*
 
-**JSON format** (written by the drafting agent, atomic write via `.tmp` rename):
+**JSON format** (written by the drafting agent as an atomic `.tmp` rename):
 ```json
 {
   "to": "recipient@example.com",
   "subject": "Subject line",
   "body": "Full email body, plain text",
   "from_agent": "gmail-agent",
-  "context": "Why this email is being sent (for reviewer only, not sent)",
+  "context": "Why this email is being sent — for reviewer only, not included in the email",
   "status": "pending",
   "created_at": "2026-04-07T14:00:00Z"
 }
 ```
 
-**After approval** (reviewer updates in-place via `jq`, never manual JSON edit):
+**After approval** (reviewing agent updates the file in-place using `jq`):
 ```json
 { ..., "status": "approved", "approved_at": "2026-04-07T14:03:00Z" }
 ```
 
-**After rejection** (reviewer updates and moves to `rejected/`):
+`jq` is a lightweight command-line JSON processor — standard on Linux. It allows scripts and agents to read and update JSON files safely without risk of corrupting the structure. The reviewing agent always uses `jq` to update outbox files; manual editing is prohibited.
+
+**After rejection** (reviewing agent updates and moves to `rejected/`):
 ```json
-{ ..., "status": "rejected", "rejected_at": "...", "rejected_reason": "Rate limit: 10 emails/24h to this recipient" }
+{ ..., "status": "rejected", "rejected_at": "...", "rejected_reason": "Rate limit exceeded: 10 emails/24h to this recipient" }
 ```
 
 **Directory structure:**
 ```
 shared/
-├── outbox/        ← pending drafts (status: pending)
-├── sent/          ← delivered emails (archived by cron after send)
-└── rejected/      ← rejected drafts with reason field
+├── outbox/        ← pending drafts
+├── sent/          ← delivered emails (moved here by cron after send)
+└── rejected/      ← rejected drafts; rejected_reason field in each JSON file
 ```
 
-**`send-approved-emails.sh`** (cron, every 30 min): scans `outbox/` for `status: approved`, sends via Gmail API, moves to `sent/`, logs to `send-email.log`. Recipients must be in Google Contacts — the script re-checks at send time and silently drops unknowns.
+**`send-approved-emails.sh`** (cron, every 30 min — our addition, not native OpenClaw): scans `outbox/` for files with `status: approved`, sends via Gmail API, moves to `sent/`, appends to `send-email.log`. Recipients are re-checked against Google Contacts at send time; unknowns are dropped silently and logged.
 
-**Review criteria** (defined in the supervisor agent's `EMAIL.md`, applied during heartbeat):
-- No more than 10 emails per 24 hours to any single recipient
-- Recipient must exist in the Google Contacts database
-- Appropriate language and tone per the agent's writing guidelines
-- Rejection immediately triggers a Slack DM to the operator with reason and override option
+**Review criteria — our implementation choices, not scaffolding requirements:** The review logic lives in the supervisor agent's `EMAIL.md`. What follows is our current policy; every deployment will define its own criteria.
+- No more than 10 emails per 24 hours to any single recipient (rate limit)
+- Recipient must exist in the Google Contacts database before the email can be queued
+- Appropriate language and tone (defined in writing guidelines, also in `EMAIL.md`)
+- Any rejection triggers an immediate Slack DM to the operator with reason and an override option
 
-### 7.3 The Slack Outbox — Partially Implemented
+These are examples. A different deployment might permit 50 emails per day, accept any valid email address, or apply entirely different content criteria. The criteria are data; the mechanism is the scaffolding.
 
-The same pattern applies to Slack posts. The directory structure exists (`shared/slack-outbox/`, `shared/slack-sent/`, `send-slack.log`); a review step is not yet implemented (Slack posts currently go directly to the channel after agent composition). Completing the pattern would add:
-- A reviewer step (supervisor agent or human) between composition and `send-slack-posts.sh`
-- A `slack-rejected/` directory with rejection reasons
-- The same rate-limit and content criteria applied to email
+### 7.2 Adding Review to Slack: A Step-by-Step Example
 
-The same pattern can be extended to any other outbound channel supported by OpenClaw (Telegram, SMS via MacOS, etc.).
+The Slack outbox infrastructure already exists in our deployment (`shared/slack-outbox/`, `shared/slack-sent/`, `send-slack.log`), providing an audit trail for all outbound posts. A review step has not yet been added. The following is how to implement one — and how to extend the same pattern to any other channel.
 
-### 7.4 The Pattern Is the Architecture
+**Step 1 — Create the review criteria file.** Add `SLACK.md` to the supervisor agent's (`main/`) workspace directory. Define the criteria: acceptable channels, rate limits, content rules. This mirrors the role of `EMAIL.md` for email.
 
-| Component | Email (implemented) | Slack (partial) | Other channels |
+**Step 2 — Add a review step to the supervisor's heartbeat.** In `main/HEARTBEAT.md`, after the existing email outbox review step, add: "Check `shared/slack-outbox/` for pending posts. For each, apply the criteria in SLACK.md. Approve (update status to `approved`) or reject (update status to `rejected`, add `rejected_reason`, move to `shared/slack-rejected/`)."
+
+**Step 3 — Create the rejected directory.** `mkdir -p shared/slack-rejected/`
+
+**Step 4 — Update `send-slack-posts.sh`.** Modify the script to check for `status: approved` before posting (currently it posts all pending items). This is the only code change required.
+
+**Step 5 — No new cron entry needed.** `send-slack-posts.sh` already runs every 5 minutes. The supervisor's heartbeat runs every 15 minutes and will now review slack drafts alongside email drafts.
+
+The same five-step pattern — criteria file, heartbeat step, rejected directory, updated send script, no new cron entry — applies to any outbound channel supported by OpenClaw.
+
+### 7.3 The Pattern Across Channels
+
+| Component | Email (implemented) | Slack (partial — review not yet added) | Generic |
 |---|---|---|---|
 | Agent writes to | `outbox/<file>.json` | `slack-outbox/<file>.json` | `<channel>-outbox/` |
-| Reviewer reads | `EMAIL.md` criteria | *(not yet defined)* | Define per channel |
-| Send script | `send-approved-emails.sh` | `send-slack-posts.sh` | Add per channel |
-| Archive | `sent/`, `rejected/` | `slack-sent/` | Add per channel |
-| Audit log | `send-email.log` | `send-slack.log` | Add per channel |
+| Review criteria | `EMAIL.md` in supervisor | `SLACK.md` *(to add)* | `<CHANNEL>.md` |
+| Reviewer heartbeat step | In `main/HEARTBEAT.md` | *(to add)* | Add to supervisor's HEARTBEAT.md |
+| Send script | `send-approved-emails.sh` | `send-slack-posts.sh` | Write per channel |
+| Archive | `sent/`, `rejected/` | `slack-sent/`, `slack-rejected/` *(to add)* | Per channel |
+| Audit log | `send-email.log` | `send-slack.log` | Per channel |
 
-The deterministic send script and the append-only audit log never change. The reviewer, the review criteria, and the channel are the variables.
+The deterministic send script and the append-only audit log are always present. The criteria file, the heartbeat step, and the rejected directory are what you add for each new channel.
 
 ---
 
-## Module 8 — Integrations: Slack and Google *(6 min)*
+## Module 8 — Example Integrations: Slack and Google *(6 min)*
 
 ### 8.1 Slack
 
-**Setup requirements:**
-- Slack app at api.slack.com/apps with Socket Mode enabled
-- Bot scopes: `channels:history`, `chat:write`, `users:read`, `groups:history` (do not add `assistant:write`)
-- Bot token and app token added to `openclaw.json` under `channels.slack`
-- CHANNELS.md updated with the channel ID → agent mapping
+Slack is connected to the **OpenClaw gateway** — not directly to individual agents. The gateway receives all incoming Slack messages and routes them to the appropriate agent based on channel or DM. The agents never interact with Slack directly; everything flows through the gateway and `openclaw.json` configuration.
 
-**Routing multiple agents:** When you have more than one agent, OpenClaw uses `bindings` in `openclaw.json` to route specific Slack channels to specific agents. One agent is marked `"default": true` and handles all DMs and unrouted messages. CHANNELS.md tracks the mapping in a human-readable form so you are not hunting through JSON when you forget which channel ID is which.
+*(Full step-by-step setup is in `Slack-Integration.md` in this repository. The following is an overview sufficient for slide-level discussion.)*
 
-**The outbound post problem:** Agents can reply within active Slack sessions. They cannot initiate a post to a channel when no session is active (e.g., a scheduled overnight summary). The **slack-outbox pattern** handles this identically to email:
-- Agent writes JSON to `shared/slack-outbox/` (channel, text, status: "pending")
-- `send-slack-posts.sh` (cron, every 5 minutes) posts via `chat.postMessage` and archives
+**On the Slack side** — three things to configure at api.slack.com/apps:
+- Create a Slack app with Socket Mode enabled. Socket Mode lets OpenClaw receive events over a persistent WebSocket rather than requiring a public inbound URL.
+- Grant the bot the required OAuth scopes: `channels:history`, `chat:write`, `users:read`, `groups:history`. Do not add `assistant:write` — this triggers a Slack-managed AI UI that conflicts with OpenClaw's handling.
+- Note the bot token (`xoxb-...`) and app token (`xapp-...`) that Slack generates. These go into `openclaw.json`.
 
-### 8.2 Google — Two Integration Paths
+**On the OpenClaw side** — three things to configure in `openclaw.json`:
+- Add the bot token and app token under `channels.slack`.
+- Register each Slack channel the bot should respond in (by channel ID) under `channels.slack.channels`. OpenClaw will ignore messages from unlisted channels.
+- Use `bindings` to route specific channels to specific agents. One agent is marked `"default": true` and handles all DMs and unrouted messages.
+
+**CHANNELS.md** — because channel IDs (e.g., `C08A1BCDE`) are not human-readable, we maintain a `CHANNELS.md` file in the workspace root mapping channel IDs to agent names and purposes. This is our implementation choice; currently it is a human-edited markdown file. *(See FIXES.md for a proposed improvement: move this mapping into `config.yaml` so it can be managed via `apply-config.sh` alongside model assignments.)*
+
+**The outbound post problem:** Agents can reply within active Slack sessions. They cannot initiate a post when no session is active (e.g., a scheduled overnight report). The slack-outbox pattern handles this: the agent writes JSON to `shared/slack-outbox/` and `send-slack-posts.sh` (cron, every 5 minutes) posts via the Slack `chat.postMessage` API and archives to `slack-sent/`.
+
+### 8.2 Credential Handling for External Services
+
+Any integration that requires authentication — Google, Slack, or other services — must make credentials available to the agent's sandbox container. OpenClaw's sandbox is ephemeral and filesystem-isolated; credentials do not appear automatically. The mechanism is explicit bind mounts in `openclaw.json` per agent:
+
+- **Read-only mounts** for credentials and scripts (e.g., OAuth `credentials.json`, Python scripts): the sandbox can read but not modify these.
+- **Read-write mounts** for token files (e.g., OAuth `token.json`): the sandbox must be able to write back refreshed tokens, or the OAuth session will expire on the next run.
+
+This applies identically to Google OAuth tokens, Slack bot tokens stored on disk, or any other credential file. Each integration section below notes its specific mount requirements. *(See `Google-Integration.md` and `Slack-Integration.md` in this repository for full setup detail.)*
+
+### 8.3 Google — Two Integration Paths
 
 We use two different tools to reach Google services, for specific reasons:
 
-| Tool | Best for | Why |
-|---|---|---|
-| `gsuite-mcp` | Gmail, Google Contacts | OAuth browser flow; writes `token.json`; works well with `messages.list` API |
-| `gog` CLI | Google Sheets, Docs, Drive | Better for bulk read/write operations on structured documents |
+| Tool | Repository | Best for | Why |
+|---|---|---|---|
+| `gsuite-mcp` | [github.com/MarkusPfundstein/mcp-gsuite](https://github.com/MarkusPfundstein/mcp-gsuite) | Gmail, Google Contacts | OAuth browser flow; writes `token.json`; works well with Gmail `messages.list` API |
+| `gog` CLI | [github.com/ditto-assistant/gog](https://github.com/ditto-assistant/gog) | Google Sheets, Docs, Drive | Better for bulk read/write on structured documents |
 
-**Why not one tool for everything?** We found that `gog` uses `threads.list` for Gmail, which returns only the first message of a thread and ignores `in:sent` filters — making it unsuitable for inbox and sent-mail workflows. `gsuite-mcp` handles OAuth and token refresh cleanly; our scripts (`gmail_api.py`, `contacts_api.py`) read the token it writes and call the Gmail API directly via `urllib`. For Drive and Sheets, `gog` is more capable and is the better fit. If `gsuite-mcp` gains full Drive/Sheets support in the future, consolidating to one tool would be worth revisiting.
+**Why two tools?** `gog` uses `threads.list` for Gmail, which returns only the first message of a thread and ignores `in:sent` filters — unsuitable for inbox and sent-mail workflows. `gsuite-mcp` handles OAuth and token refresh cleanly; our scripts (`gmail_api.py`, `contacts_api.py`) read the token it writes and call the Gmail API directly via Python `urllib` (no third-party pip dependencies in the sandbox). For Drive and Sheets, `gog` is more capable. If your use case doesn't require Gmail inbox access, `gog` alone may suffice.
 
-**Credential handling in the sandbox:** OAuth tokens and credential files must be bind-mounted into the agent's sandbox container. Scripts must be mounted read-only; token files must be writable (for refresh). These mounts are configured in `openclaw.json` per agent.
-
-**Google Cloud setup prerequisites** (students do this before the lab):
-- Create a Google Cloud project
-- Enable the APIs you need: Gmail, People, Drive, Sheets as applicable
-- Configure OAuth consent screen and download credentials JSON
-- Run `gsuite-mcp auth login` (browser flow, one time) to generate `token.json`
+**Google Cloud setup** (done once before the lab — full steps in `Google-Integration.md`):
+- Create a Google Cloud project and enable the APIs you need: Gmail, People, Drive, Sheets as applicable
+- Configure the OAuth consent screen (internal or external depending on your Google Workspace plan)
+- Download `credentials.json` from the API credentials page
+- Run `gsuite-mcp auth login` (browser-based OAuth flow, one time) to generate `token.json`
+- Bind-mount both files into the agent sandbox per §8.2 above
 
 ---
 
@@ -851,7 +899,7 @@ Students will:
 
 ---
 
-*Outline version: 2026-03-18 rev 6.*
+*Outline version: 2026-03-18 rev 7.*
 
 ---
 
