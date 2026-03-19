@@ -151,12 +151,14 @@ A layered defense. Each layer is described in detail when it appears in setup �
 | Layer | Mechanism | Threat it addresses |
 |---|---|---|
 | Network | Tailscale-only gateway binding (not `0.0.0.0`) | Dashboard reachable only from your Tailscale-enrolled devices; also prevents WebSocket hijack from malicious websites. Dashboard access additionally requires a pairing token introduced in recent OpenClaw versions. See ["ClawJacked" — The Hacker News](https://thehackernews.com/2026/02/clawjacked-flaw-lets-malicious-sites.html) for the real-world exploit (CVE-2026-25253) that targets gateways bound to `0.0.0.0`. |
-| Network | iptables DOCKER-USER rules | Sandbox containers cannot reach LAN, Tailscale nodes, or SSH |
+| Network | iptables DOCKER-USER rules | Sandbox containers cannot make outbound connections to your local network (LAN) or to Tailscale nodes (100.64.0.0/10). Connections to the internet (e.g., Google APIs, Anthropic API) are permitted — agents need them. SSH connections (port 22) are additionally blocked regardless of destination. |
 | Execution | Sandbox mode: `mode: all` | Agent commands run in throwaway containers, not on the host |
 | Execution | No `docker.sock` in sandbox | No container escape to host Docker daemon |
 | Config | Disable `commands.config` writes | Agent cannot modify gateway configuration via chat |
 | Filesystem | docker-compose bind mounts (explicit, narrow) | Agent's sandbox can only access the specific directories you mount — it cannot reach the rest of your host filesystem, config files, or other services |
 | Credentials | Separate dedicated service accounts | If a credential is compromised, the attacker's access is limited to that account's permissions on that one service — they cannot pivot to your personal email, other accounts, or other systems. The "blast" is the damage; the "radius" is how far it can spread. Separate accounts keep the radius small. |
+
+**A note on sandbox architecture:** The OpenClaw gateway is a long-running Docker container that hosts the agent runtime and dashboard. When the agent runs an exec command (a script, a shell command), OpenClaw spawns a separate, ephemeral Docker container for that execution — this is the "sandbox." The gateway container itself can reach Tailscale (it needs to for the dashboard and Slack); the sandbox containers are what the iptables rules restrict. Internet access (Google APIs, Anthropic API, etc.) is permitted from sandbox containers — agents need it to call external services. Only LAN and Tailscale node access is blocked, preventing lateral movement to other machines on your network. *(See FIXES.md for notes on further egress hardening if desired.)*
 
 *A CVE (Common Vulnerabilities and Exposures) is a standardized identifier assigned to a publicly disclosed security vulnerability — essentially a bug-tracker entry for cybersecurity flaws, maintained by MITRE and referenced across the security industry. When a CVE is cited here, a link to coverage of the specific incident is provided so the reader can examine the details.*
 
@@ -168,7 +170,7 @@ The gap between what is possible and what is commonly deployed is striking: a 20
 
 The long-term goal of a personal agent deployment is to remove yourself from routine decisions — not to keep you perpetually in the loop. But trust is earned, not assumed. We start with review at every consequential action and progressively delegate that review as we gain confidence in the agent's behavior.
 
-The **outbox pattern** is the mechanism: the agent writes a draft to a queue, a reviewer approves or rejects, and a deterministic cron script handles the actual sending. The reviewer is not always a human.
+The **outbox pattern** is the mechanism: the agent writes a draft to a queue, a reviewer approves or rejects, and a deterministic cron script handles the actual sending (if approved). The reviewer is either another agent assigned to the task or a human.
 
 ```
 Agent writes draft JSON → shared/outbox/  (status: "pending")
@@ -177,20 +179,22 @@ Deterministic cron script sends approved items → archives to sent/
 Full audit trail preserved in outbox / sent / rejected
 ```
 
-**The reviewer is a design choice, not a fixed role.** In our current deployment we use two tiers:
+In our system we have three agents: a supervisory agent (reviewer as needed), a clerical agent (currnetly tracking submissions to web forms and creating reports on submissions to notify humans via Slack and email), and a Gmail assist agent (work in progress to help manage email, calendar, tasks).
 
-- **Agent review** for outbound email from our conference-tracking agent, whose messages are template-based with light natural language fills. The criteria are clear and consistent — appropriate language, no more than a handful of emails per day to any recipient, recipient must be in the contacts database — so a second agent can apply them reliably. This already operates without a human in the loop.
+**The supervisory agent (reviewer) is a design choice, not a fixed role.** In our current deployment we use two tiers:
 
-- **Human review** for outbound email from our Gmail agent, which reads an incoming message, interprets its context, and drafts a substantive reply. The judgment required is higher and the stakes of an error are greater. We review manually while we build a track record.
+- **Agent review** for outbound email from our clerical agent, whose routine reporting uses template-based messages with light natural language fills. The review criteria — appropriate language, no more than a handful of emails per day to any recipient, recipient must be in the contacts database — are defined in `EMAIL.md` and applied by the supervisory agent during its heartbeat. The supervisory agent approves or rejects each queued draft (fully logged for diagnostics).
+
+- **Human review** for outbound email from our Gmail assist agent, which reads incoming messages, interprets them, and drafts a substantive reply. The judgment required is higher and the stakes of an error are greater. The human reviews manually while we build a track record and fine-tune the model's instructions regarding email handling..
 
 As the Gmail agent's drafts prove consistently good over time, we will delegate review to a second agent — likely a smaller, cheaper reasoning model suited to the specific review task. This is also an economic design decision: a capable reasoning model for drafting, a lighter model for reviewing against known criteria, and human oversight only where neither suffices yet.
 
-**The principle generalizes beyond email.** Any agent action with real-world consequences — a Slack post to a public channel, an API call that creates or modifies an external record — should start with review enabled. The outbox pattern and the cron script that processes it are the implementation. The review criteria and the reviewer evolve as the deployment matures.
+**The principle generalizes beyond email.** Any agent action with real-world consequences — a Slack post to a public channel, an API call that creates or modifies an external record — should ideally start with review enabled. The outbox pattern is the mechanism; the review criteria and the reviewer evolve as the deployment matures. Implementation details are in Modules 5 and 6.
 
 This is a living architecture, not a final answer. What we describe here is our current state; it will change as our agents earn more autonomy.
 
 ### 2.6 Charter Summary
-Four principles that drive every decision in this talk:
+Four principles that drive design and implementation decisions in this deployment:
 
 1. **Separation of responsibilities** — anything deterministic or procedural is implemented in code; anything requiring judgment, creativity, or language is handled by the model. The boundary is sharp and explicit.
 2. **Containment** — network, execution, filesystem, and config isolation are in place before anything external is connected.
@@ -220,7 +224,7 @@ You interact with the gateway in two ways: through Slack (the primary day-to-day
 
 **A practical note on gateway configuration:** Changes to `openclaw.json` — the live gateway configuration — are more awkward than they should be. The dashboard provides a small JSON editor that is functional but inconvenient for anything beyond minor edits. Our workflow: extract the current config from the running container, edit it with a proper editor or with Claude Code, copy it back into the container, and restart the gateway. We have scripts that handle the extract and restart steps; the editing is manual. This is a real friction point worth acknowledging — it is not unique to our setup, and there is no elegant solution yet.
 
-**Tailscale prerequisite:** Tailscale must be installed and running on your host before starting this deployment. See [tailscale.com/download](https://tailscale.com/download) for installation — the setup takes about five minutes and is well-documented. Once installed, `tailscale serve` handles the HTTPS proxy automatically.
+**Tailscale prerequisite:** Tailscale must be installed and running on your host before deploying OpenClaw. See [tailscale.com/download](https://tailscale.com/download) for installation — the setup takes about five minutes and is well-documented. Once installed, `tailscale serve` handles the HTTPS proxy automatically.
 
 ### 3.2 Choosing Your Model
 
@@ -233,9 +237,11 @@ In our deployment we use a local GPU for some agents and a cloud API for others 
 
 **On running a local model:** The key constraint is memory, not just GPU. A 32 GB unified memory machine (e.g., M-series Mac) can run smaller quantized models but will see lower throughput and may struggle with large context windows. Throughput matters for scheduled tasks — a 50-tps model can produce a 500-token email digest in 10 seconds; a 5-tps model takes 100 seconds. If you are not already confident your hardware can run a capable model, the cloud API path removes this variable entirely and lets you focus on the agent architecture, which is the point of this tutorial.
 
-**Our recommendation for the tutorial:** Use the cloud API (Anthropic Claude) unless you already have local model inference working. The architecture is identical — the only difference is one line in `config.yaml`.
+**Our recommendation for the tutorial:** Use the cloud API (e.g., Anthropic Claude) unless you already have local model inference working. The architecture is identical — the only difference is one line in `config.yaml`.
 
-### 3.3 config.yaml: Your Model Switch (Our Scaffolding, Not Native OpenClaw)
+### 3.3 Quick and Easy Model Switch 
+
+In order to make it easy to swamp models in for individual or all agents, we created a config.yaml to specify which model to use for each agent, and a set of scripts to push those assignments into OpenClaw.
 
 OpenClaw stores per-agent model assignments inside `openclaw.json` — a large JSON configuration file that lives inside the running gateway container. Editing it directly means either using the dashboard's small JSON editor or manually extracting the file, editing it, copying it back, and restarting the gateway. For a single change that's manageable; for experimenting across agents and providers it becomes tedious and error-prone.
 
@@ -255,21 +261,26 @@ agents:
 anthropic_api_key: sk-ant-...
 ```
 
-**Applying a change:**
+**Applying a change — step 1, preview:**
 ```bash
-./apply-config.sh --dry-run   # print the proposed patch without applying it
-./apply-config.sh             # apply the patch and restart the gateway
+./apply-config.sh --dry-run
 ```
+This prints the JSON diff that *would* be written to `openclaw.json` — useful for pasting to an AI assistant or reviewing manually to confirm the change looks right. It is a preview only; nothing is applied.
 
-`--dry-run` shows the JSON diff that *would* be written to `openclaw.json` — useful for pasting to an AI assistant and asking "does this look right?" before committing. It does not stop automatically if something looks wrong; it is a preview for human inspection, not an automated gate. Running `apply-config.sh` without `--dry-run` applies and restarts unconditionally.
+**Step 2, apply (only after reviewing the dry-run output):**
+```bash
+./apply-config.sh
+```
+Applies the patch to `openclaw.json` and restarts the gateway. Do not run both commands in a single copy/paste — the dry-run output needs to be inspected before applying.
 
-**Reverting to a known-good configuration:** Before experimenting with a new model or provider, save your current working `config.yaml` as `config.yaml.stable`. If an experiment goes wrong — a model behaves poorly, you exhaust API credits, a provider has an outage — restore `config.yaml.stable` and run `apply-config.sh`. This pattern works whether your stable baseline is a local model or a cloud provider, and is more general than the original `revert-to-local.sh` script, which assumed a local GPU fallback was always available.
+**Reverting to a known-good configuration:** Before experimenting with a new model or provider, save your current working `config.yaml` as `config.yaml.stable`. If an experiment goes wrong — a model behaves poorly, you exhaust API credits, a provider has an outage — restore `config.yaml.stable` and run `apply-config.sh`. This pattern works whether your stable baseline is a local model or a cloud provider.
 
-The key point: model assignment is not a permanent choice. Any agent can be switched to a different model in under 30 seconds without touching `docker-compose.yml` or any other configuration.
+
+The key point: model assignment is not a permanent choice. Any agent can be switched to a different model in under 30 seconds without touching `docker-compose.yml` or fiddling with the dashboard or any other configuration.
 
 ### 3.4 Repository Structure
 
-For the tutorial, students work with a single private repository:
+This repository is structured so that you can implement OpenClaw and an initial set of agents. The structure separates the OpenClaw and (if used) local model configurations -- the platform -- and the agent-specific configurations.
 
 ```
 OpenClaw-Tutorial/               ← your private repo
@@ -287,7 +298,7 @@ OpenClaw-Tutorial/               ← your private repo
     └── scripts/
 ```
 
-A single repo keeps things simple. The public/private split (two repos) is an option for those who want to share their infrastructure config with others — it is not required and adds coordination overhead most students don't need.
+The tutorial starts with two agents: `main` (the supervisory agent, responsible for outbox review among other duties) and `gmail-agent` (the Gmail assistant). This two-agent setup is the minimum needed to demonstrate the review workflow end-to-end.
 
 ### 3.5 Security Hardening Checklist
 
@@ -309,14 +320,14 @@ sudo iptables -L DOCKER-USER -n | grep DROP   # must show 3 rules
 
 ---
 
-## Module 4 — Agent Identity: The Workspace and the 8 Files *(15 min)*
+## Module 4 — Agent Identity: The Workspace and the Sacred-8 Files *(15 min)*
 
 ### 4.1 The Workspace
 An agent's workspace is a directory of plain markdown files mounted into the OpenClaw gateway container. Everything the agent knows about itself, its user, its tools, and its duties lives in these files — readable, auditable, editable in any text editor, and version-controlled in git.
 
-OpenClaw automatically loads exactly 8 of these files into the system prompt on every inference call. Everything else is invisible to the model unless the agent explicitly reads it with a tool call.
+OpenClaw automatically loads eight of these files into the system prompt on every inference call for the agent. Everything else (task-specific guidance, etc.) is invisible to the model unless the agent explicitly reads it with a tool call.  These eight files define the agent's identify, personality, style, and roles.
 
-**The files OpenClaw auto-loads (in order):**
+**The Sacred Eight: files OpenClaw auto-loads (in order):**
 
 | # | File | What it holds |
 |---|---|---|
@@ -335,6 +346,8 @@ OpenClaw automatically loads exactly 8 of these files into the system prompt on 
 
 ### 4.2 What Each File Should (and Should Not) Contain
 
+*Content strategy — what goes where and why — is covered here. The risks of getting it wrong (duplicated facts, drifting instructions) are treated in §4.4.*
+
 **`SOUL.md`** holds the behavioral invariants that must hold unconditionally. If a rule must never be violated, it belongs here — not in a secondary file. Keep it focused: this is constitutional law, not policy.
 
 **`IDENTITY.md`** describes who the agent is — its name, its Slack behavior contract, and a concise list of its recurring duties. Duties are listed here (what and when), but the how belongs in runbooks (read separately, covered in Module 6). Do not duplicate rules from SOUL.md here — reference them.
@@ -351,9 +364,9 @@ OpenClaw automatically loads exactly 8 of these files into the system prompt on 
 
 ### 4.3 The Files That Are NOT Auto-Loaded — and Why That Matters
 
-Several important files live in the workspace but are invisible to the agent unless explicitly requested:
+Several important files live in the workspace but are not auto-loaded: they reach the agent only when explicitly referenced in one of the Sacred Eight files, in a runbook or procedure, or when the agent is directly asked to read them.
 
-**`PATHS.md`** — the canonical registry of every absolute path used by the agent: workspace root, shared directory, script locations, outbox paths. When we discovered that path strings were being duplicated across TOOLS.md, multiple runbooks, and HEARTBEAT.md — and drifting out of sync as the workspace evolved — we created PATHS.md as the single source of truth. All other files now reference PATHS.md rather than hard-coding paths. The agent reads PATHS.md at the start of any task involving file I/O.
+**`PATHS.md`** — the canonical registry of every absolute path used by the agent: workspace root, shared directory, script locations, outbox paths. We find that path strings inevitably get duplicated across TOOLS.md, runbooks, and HEARTBEAT.md and drift out of sync as the workspace evolves. PATHS.md is the single source of truth; all other files reference it rather than hard-coding paths. The agent reads PATHS.md at the start of any task involving file I/O.
 
 **`CHANNELS.md`** — a registry of which Slack channel maps to which agent, including channel IDs and routing rules. Needed as soon as you have more than one agent sharing a Slack workspace.
 
@@ -365,7 +378,7 @@ The implication: **anything the agent must do correctly and consistently must li
 
 ### 4.4 The Single-Source-of-Truth Principle in Practice
 
-The most insidious class of agent configuration bug is the duplicated instruction. When the same rule, path, or fact appears in more than one file, they will eventually diverge — and the agent will silently blend contradictory signals into inconsistent behavior.
+One of the most insidious classes of agent configuration bug is the duplicated instruction. When the same rule, path, or fact appears in more than one file, they will eventually diverge — and the agent will silently blend contradictory signals into inconsistent behavior.
 
 Examples of how this manifests:
 - `SOUL.md` says "always get approval before sending email." `IDENTITY.md` has an older version of the same rule, phrased differently, with an implicit exception you added and forgot to add to SOUL.md. The agent interprets the combination as having a situational exception — sometimes it asks, sometimes it doesn't.
@@ -375,9 +388,9 @@ The fix is architectural: **one authoritative home for each fact.** PATHS.md for
 
 ### 4.5 How Reliably Does the Agent Follow the 8 Files?
 
-More reliably than secondary files, but not unconditionally. There are two important nuances:
+More reliably than secondary files, but not unconditionally. This can be surprising, for instance if a template is changed and the agent uses the old template rather than the new one. There are two important nuances:
 
-**Instructions vs. examples.** OpenClaw rebuilds the system prompt from the 8 files on every call — but it also sends the full session history (the accumulated back-and-forth since the last session reset). When instruction text and behavioral examples in the history conflict, examples often win. An agent with many examples of old behavior in its session history may not immediately adopt a newly-written rule, even in SOUL.md.
+**Instructions vs. examples.** OpenClaw rebuilds the system prompt from the 8 files on every call — but it *also* sends the full session history (the accumulated back-and-forth since the last session reset). When instruction text and behavioral examples in the history conflict, examples often win. An agent with many examples of old behavior in its session history may not immediately adopt a newly-written rule, even one enshrined in SOUL.md.
 
 **What this means for updates.** Updating a file on disk does not guarantee the agent immediately adopts the new behavior. Any behavioral change requires four steps: (1) edit the right file, (2) reset the session to clear counter-examples from history, (3) explicitly tell the agent about the change in the first message of the new session, (4) verify the next execution follows the new rule.
 
@@ -424,72 +437,106 @@ Beyond token cost: the agent must remember whether it already ran the task today
 
 **The critical distinction for TODO.md vs. CALENDAR.md:** If a task needs to happen again next week, it belongs in CALENDAR.md. An agent that re-schedules recurring tasks by writing new TODO.md entries will lose track of them after a session reset — they disappear silently.
 
+**What is a session?** In OpenClaw, a session is a conversation history file (`.jsonl`) stored in the gateway's persistent Docker volume. Each agent maintains its own session; within that, different Slack channels and the heartbeat each have their own sub-session. A session accumulates every exchange — user messages, agent responses, tool calls, and results — as an append-only log. Crucially, sessions survive gateway restarts: when the gateway comes back up, it picks up the history where it left off.
+
+**Session reset** is not a native OpenClaw operation — it is our addition. OpenClaw never resets sessions on its own; they grow indefinitely. Our `reset-sessions.sh` script (run nightly via cron) archives any session file larger than 512 KB and truncates it to zero. The agent starts fresh on the next heartbeat, reading its identity and context from the Sacred Eight files rather than from accumulated history. When you deliberately change agent behavior, you should reset the relevant session immediately rather than waiting for the nightly job.
+
+**Why HEARTBEAT.md must be stable:** Beyond the token-efficiency argument (the 672-heartbeats-per-week table), HEARTBEAT.md is consulted on every heartbeat for the lifetime of the agent. A mistake introduced while editing it — a typo, a malformed step, a removed closing line — can silently impair or disable the agent's core reflexes until caught and corrected. Keep HEARTBEAT.md lean and stable: infrastructure reflexes only, never task-specific procedures. Those belong in runbooks, where they can be changed without risking the heartbeat loop.
+
 ### 5.4 The Scheduling Engine: check-todos.sh
 
-```
-cron (every 5 minutes — zero tokens)
-  └─ check-todos.sh
-       ├─ reads CALENDAR.md → is a recurring entry due? → writes READY to TODO.md
-       └─ reads TODO.md → is a one-shot past its time? → marks READY in-place
+**File formats:**
 
-OpenClaw heartbeat (every 15 minutes — tokens only when READY work exists)
-  └─ agent greps TODO.md for READY items
-       ├─ none found → HEARTBEAT_OK      (cheap — no reasoning required)
-       └─ READY found → execute task     (LLM earns its keep here)
 ```
+# CALENDAR.md — human-authored, never modified by scripts or agents
+MON,THU 14:00 | Send notifications per runbooks/RUNBOOK_NOTIFICATIONS.md
+
+# TODO.md — agent writes one-shots; check-todos.sh promotes to READY
+# Agent writes a one-shot:
+2026-04-07T18:00:00Z | Follow up with Jones re: proposal
+
+# check-todos.sh promotes it (replaces the line in-place):
+READY | 2026-04-07T18:00:00Z | Follow up with Jones re: proposal
+
+# check-todos.sh also appends recurring items from CALENDAR.md:
+READY | 2026-04-07T14:00:00Z | Send notifications per runbooks/RUNBOOK_NOTIFICATIONS.md
+```
+
+**The execution flow — precisely:**
+
+```
+check-todos.sh  (cron, every 5 min, zero tokens)
+  ├─ Reads CALENDAR.md
+  │    For each entry: is it due today/now AND not already fired today?
+  │    (checks shared/todos/calendar-state.json for last-fired timestamp)
+  │    If due: appends  READY | <timestamp> | <task>  to TODO.md
+  │    Updates calendar-state.json. CALENDAR.md is never modified.
+  │
+  └─ Reads TODO.md
+       For each timestamp line: is the time past?
+       If yes: rewrites that line in-place as  READY | <timestamp> | <task>
+
+OpenClaw heartbeat  (every 15 min, tokens only when READY lines exist)
+  └─ Agent reads TODO.md, looks for lines beginning with READY
+       ├─ None found → replies HEARTBEAT_OK  (fast, minimal tokens)
+       └─ READY line found → executes the task per its runbook
+            → removes the completed line from TODO.md
+            → logs the completed task to shared/todos/todo.log
+```
+
+CALENDAR.md is never touched by the script or the agent — it is the human-authored source of recurring duties. TODO.md is the runtime queue: the script promotes entries into it, the agent executes and removes them. *(Note: the agent removing its own completed lines is an area flagged for improvement — see FIXES.md.)*
 
 **State tracking:** `check-todos.sh` records last-fired timestamps in `shared/todos/calendar-state.json` on the host — not in the agent's memory. Deduplication survives session resets.
-
-**CALENDAR.md format:**
-```
-# DAYS HH:MM UTC | task description (points to its runbook)
-DAILY    14:00 | Run daily sync per runbooks/RUNBOOK_DAILY_SYNC.md
-MON,THU  14:00 | Send notifications per runbooks/RUNBOOK_NOTIFICATIONS.md
-```
 
 ### 5.5 Session Management
 
 OpenClaw replays the full conversation history on every inference call. As session history grows, latency grows — not because of context size per se, but because of unbounded growth in the history file.
 
-**Prefill vs. generation** — a nuance worth understanding: LLM generation (output tokens) runs sequentially at ~50 tps on a capable local GPU. Prefill (processing the input — system prompt + history) runs in parallel across all input tokens and is much faster: 10,000 tokens prefill in ~1–3 seconds. Session history is the real latency risk because it grows without a hard cap, while the system prompt is bounded at 150K characters.
+**Prefill vs. generation** — a nuance worth understanding: LLM generation (output tokens) runs sequentially at perhaps 50-100 tps on a reasonably capable local GPU. Prefill (processing the input — system prompt + history) runs in parallel across all input tokens and is much faster: 10,000 tokens prefill in ~1–3 seconds. Session history is the real latency risk because it grows without a hard cap, while the system prompt is bounded at 150K characters.
 
-**Session management scripts** (run via cron on the host):
-```
-*/5  * * * *  monitor-sessions.sh    # log session file sizes every 5 min
-0 3  * * *    reset-sessions.sh      # archive and truncate sessions >512KB daily
-*/30 * * * *  seed-sessions.sh       # restore missing heartbeat session files
-```
 
-### 5.6 The Full Host-Side Crontab
+### 5.6 The Host-Side Crontab
 
-Five deterministic scripts constitute the entire automation layer outside the LLM:
+All scheduling and session management runs on the host as cron jobs — never inside any container. Crontab supports comment lines, so the entries are grouped by purpose:
 
 ```
 TZ=America/Chicago
-*/5  * * * *  check-todos.sh           # scheduling engine — promotes READY items
-*/5  * * * *  monitor-sessions.sh      # session size logging
-*/30 * * * *  seed-sessions.sh         # heartbeat session file recovery
-0    3 * * *  reset-sessions.sh        # daily archive and truncate
-*/30 * * * *  send-approved-emails.sh  # send human-approved outbox emails
+
+# ── Scheduling engine (see §5.4) ─────────────────────────────────────────────
+*/5  * * * *  check-todos.sh           # promote due CALENDAR entries and past-due
+                                        # TODO entries to READY; zero LLM tokens
+
+# ── Outbox processing (see §2.5) ─────────────────────────────────────────────
+*/30 * * * *  send-approved-emails.sh  # send approved outbox drafts via Gmail API;
+                                        # move to sent/; archive rejected/
+
+# ── Session management (see §5.5) ────────────────────────────────────────────
+*/5  * * * *  monitor-sessions.sh      # log session .jsonl sizes every 5 min;
+                                        # alert if approaching reset threshold
+0    3 * * *  reset-sessions.sh        # archive sessions >512KB, truncate to zero;
+                                        # agent restarts clean from Sacred Eight files
+*/30 * * * *  seed-sessions.sh         # restore missing heartbeat session files
+                                        # after gateway restarts
 ```
 
-All run on the **host** as the deploying user — not inside any container. Nothing in this crontab requires the LLM to be running or responsive.
+Nothing in this crontab requires the LLM to be running. The scheduling engine, outbox sender, and session manager all operate independently of whether any agent is active.
 
 ---
 
-## Module 6 — The Scaffolding: Runbooks, Scripts, and Cron *(10 min)*
+## Module 6 — Separation of Responsibilities: Runbooks, Scripts, and Cron *(10 min)*
 
-### 6.1 The Three-Layer Pattern Revisited
+### 6.1 The Three-Layer Pattern in Practice
 
-The scaffolding from §2.3 is now concrete. Each layer has a specific role and a specific location:
+The layered architecture from §2.3 is now concrete. The LLM sits atop three deterministic layers; this module describes those three layers and how they work together.
 
 | Layer | Location | Role |
 |---|---|---|
-| Cron | Host crontab | Decides when. Promotes READY items. Sends approved outputs. |
-| Scripts | `scripts/*.py`, `scripts/*.sh` | Does deterministic work: fetch, transform, count, route, send API calls. |
-| Runbooks | `agent/runbooks/RUNBOOK_*.md` | Tells the agent which scripts to call, in what order, with what arguments, and what to do with the output. |
+| **LLM** | OpenClaw gateway | Judgment, composition, language — invokes runbooks for procedural tasks |
+| **Runbooks** | `agent/runbooks/RUNBOOK_*.md` | Step-by-step procedures: which scripts to call, in what order, with what arguments, and what to do with the output |
+| **Scripts** | `agents/scripts/*.py`, `*.sh` | Deterministic work: fetch, transform, count, route, call APIs, return structured results |
+| **Cron** | Host crontab | Decides when: promotes READY items, sends approved outputs, manages sessions |
 
-The LLM never decides when. The cron scripts never decide what to say. Scripts never decide what action to take — they execute the action deterministically and return results.
+The LLM never decides when to act. Cron never decides what to say. Scripts never decide what action to take — they execute deterministically and return results. Each layer does only what belongs to it.
 
 ### 6.2 Runbooks: Procedures the Agent Follows
 
@@ -695,7 +742,7 @@ Students will:
 
 ---
 
-*Outline version: 2026-03-18 rev 4.*
+*Outline version: 2026-03-18 rev 5.*
 
 ---
 
