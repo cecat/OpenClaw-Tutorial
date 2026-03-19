@@ -1,11 +1,21 @@
 # Getting Started with OpenClaw: A Safety-First Approach
 ## Tutorial Outline — 90-Minute Lecture
 
-**Target audience:** Developers with working knowledge of GitHub, Python, shell scripting, Docker, and Linux (crontab). No prior OpenClaw experience required.
+---
 
-**Central theme:** Autonomous agents are powerful and genuinely useful — and that power demands deliberate design. This tutorial builds a working OpenClaw deployment with safety, containment, and alignment as first-class design goals, not afterthoughts.
+## Contents
 
-**Tutorial repository:** `github.com/cecat/OpenClaw-Tutorial` — contains this outline, the slide deck, and (when the hands-on lab is developed) a `gateway/` directory with platform configuration and an `agents/` directory with a parameterized agent workspace ready to deploy.
+| Module | Title | Time |
+|---|---|---|
+| 1 | What Is OpenClaw and Why This Approach? | 10 min |
+| 2 | The Design Charter | 15 min |
+| 3 | Platform Architecture and Model Choice | 15 min |
+| 4 | Agent Identity: The Workspace and the Sacred-8 Files | 15 min |
+| 5 | Scheduling: The Shell Owns the Clock | 12 min |
+| 6 | Separation of Responsibilities: Runbooks, Scripts, and Cron | 10 min |
+| 7 | Layered Oversight: The Outbox and Review Pattern | 8 min |
+| 8 | Integrations: Slack and Google | 6 min |
+| 9 | Lessons Learned | 5 min |
 
 ---
 
