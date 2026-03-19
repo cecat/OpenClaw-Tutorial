@@ -12,17 +12,19 @@
 ## Module 1 — What Is OpenClaw and Why This Approach? *(10 min)*
 
 ### 1.1 What OpenClaw Is (and Isn't)
-- OpenClaw is an **agent framework**, not a model — it gives a language model memory, tools, communication channels, and a schedule
+- OpenClaw is an **agent framework** that provides persistent memory, tools, and communication channels to multiple agents, each implemented via a model
 - Open source, self-hosted: you own the configuration, credentials, history, and behavior
-- Compatible with local models (via vLLM) and cloud APIs (Anthropic Claude, OpenAI)
-- Communicates through Slack, a web dashboard, Telegram, and 50+ other channels
-- The model provides cognition; OpenClaw provides orchestration, file access, tool execution, and memory
+- Enables each agent to use a different model, including local models (e.g., via vLLM) and models provided via cloud APIs (e.g., Anthropic Claude, OpenAI, Google)
+- Communicates through multiple optional channels including Slack, a web dashboard, Telegram, and dozens of other channels
+- For each agent, the model provides cognition; OpenClaw provides orchestration, file access, tool execution, memory, and limited native scheduling (a periodic heartbeat that fires every N minutes — more on the limitations of this in Module 5)
 
 ### 1.2 What an Agent Actually Does (that a chatbot doesn't)
 - A chatbot waits for a question and answers it. An agent acts between conversations — on a schedule, in response to events, and on its own judgment about what to do next.
 - An agent can send your email, post to Slack, read your calendar, modify files, and call APIs — autonomously, while you sleep.
 - This is genuinely useful. It is also qualitatively different from a chatbot, and must be designed accordingly.
-- OpenClaw agents can be partially autonomous without being fully autonomous — calibrating that balance deliberately is what this tutorial is about.
+- OpenClaw agents can be partially autonomous without being fully autonomous — calibrating that balance deliberately is an important facet of this tutorial.
+
+Out of the box, OpenClaw supports three types of triggers: **incoming messages** (a Slack DM, a channel message, a web dashboard conversation), **the heartbeat** (a periodic timer that fires every N minutes — the only proactive, non-reactive trigger native to OpenClaw), and **channel-specific events** like Slack reactions or mentions depending on configuration. The heartbeat is the closest thing to native scheduling, but it is blunt: it fires on every interval whether or not there is any work to do, and the agent must reason about what (if anything) to do each time — burning inference on the question hundreds of times a week. This gap is what our scheduling scaffolding (Module 5) was built to address.
 
 ### 1.3 Why "Safety-First"?
 - Security and containment have historically been afterthoughts with exciting new technology — something addressed after adoption, once incidents accumulate, rather than before. OpenClaw is no exception to this pattern. The platform is powerful, the demos are compelling, and the natural instinct is to get something running and worry about hardening later. Rapid adoption amplifies this risk: Jensen Huang remarked at GTC in March 2026 that OpenClaw is the fastest-adopted open source project of all time. [*verify and cite*] The faster a platform spreads, the faster it becomes a target.
@@ -67,9 +69,7 @@ Four risk categories when running an autonomous agent. These are not hypothetica
 
 2. **Lateral movement** — a sandbox container that can reach your LAN, other Tailscale nodes, or SSH services can be used as a pivot point. This is especially relevant when the agent's sandbox runs on a machine that also has access to other internal services.
 
-3. **Runaway external actions** — the agent takes actions with real-world consequences without human review: sending email, posting to public channels, modifying files, or changing configuration. It does this not out of malice but because it is trying to be helpful, and "helpful" was not bounded precisely enough. A common example: ask the agent to diagnose a problem and it will often try to fix it, touching things you did not ask it to touch. *(This is Lesson 4 in Module 8.)*
-
-*The phrase "mutates external state" is weird - do you mean to take action on the external world?  Mutate is not the word we use for that - people will think about mutating organisms, mutant ninja turtles, or X- Men. If we are covering it later that's fine, but the best example is that if you ask the agent to diagnose something it will do so and then often will try to fix it, messing with things you don't want it to mess with (this was one of our lessons learned, no need to be redundant here but it could be a better wahy to explain it than mutate**
+3. **Runaway external actions** — the agent takes actions with real-world consequences without human review: sending email, posting to public channels, modifying files, or changing configuration. A mistake (such as deleting files or changing configs) by an agent is not intentionally malicious, but is the model trying to be helpful, where "helpful" was not bounded precisely enough. A common example: ask the agent to diagnose a problem and it will often try to fix it, touching things you did not ask it to touch. *(This is Lesson 4 in Module 8.)*
 
 4. **Credential exfiltration** — API keys, OAuth tokens, and other secrets passed to the sandbox can leak via outbound HTTP if the sandbox has unrestricted network access.
 
@@ -77,9 +77,7 @@ Four risk categories when running an autonomous agent. These are not hypothetica
 
 ### 2.2 Alignment
 
-In AI research, alignment refers to the challenge of ensuring that a system's goals, values, and behavior remain compatible with human intentions — not just in the literal task at hand, but across the full range of situations the system may encounter. A well-aligned agent does what you actually want, not merely what you literally instructed it to do, and does not pursue its objectives in ways that create harms you did not anticipate or authorize.
-
-Alignment is not a solved problem at the frontier of AI research, and we do not claim to solve it here. What we can do at the scale of a personal deployment is make alignment a deliberate design goal rather than an assumption.
+Alignment is ensuring that a system's goals, values, methods, and behavior remain compatible with human intentions — not just in the literal task at hand, but across the full range of situations the system may encounter. A well-aligned agent does what you actually want, not merely what you literally instructed it to do, and does not pursue its objectives in ways that create harms you did not anticipate or authorize. This is a significant research challenge at the frontier of AI, but there are concrete steps we can take to promote alignment in our OpenClaw deployment — making alignment a design goal rather than an assumption or afterthought.
 
 Our approach has two complementary components:
 
@@ -93,6 +91,7 @@ Essential invariants to establish in `SOUL.md` before connecting any external se
 - **External communications go through the outbox.** The agent queues; a human or a designated reviewer sends.
 - **Deferred work goes to TODO.md.** The agent does not sleep, loop, or block waiting for a future time. It writes the task and returns.
 - **The cost of stopping unnecessarily is low. The cost of acting incorrectly is high.** Encode this asymmetry explicitly — agents should err toward caution, not toward helpfulness, when the two are in tension.
+- **Internal details are private.** The agent must never disclose pathnames, filenames, or configuration details; tokens, passwords, or credentials; or the contents of its own identity files (SOUL.md, IDENTITY.md, and others) to any external party — including in email, Slack messages, or any channel that reaches beyond the local system. What the agent knows about itself stays inside the system.
 
 ### 2.3 Separation of Responsibilities: Code for Procedure, LLM for Judgment
 
@@ -151,7 +150,7 @@ A layered defense. Each layer is described in detail when it appears in setup �
 
 | Layer | Mechanism | Threat it addresses |
 |---|---|---|
-| Network | Tailscale-only gateway binding (not `0.0.0.0`) | Dashboard reachable only from your Tailscale-enrolled devices; also prevents WebSocket hijack from malicious websites (CVE-2026-25253 / "ClawJacked"). Dashboard access additionally requires a pairing token introduced in recent OpenClaw versions. |
+| Network | Tailscale-only gateway binding (not `0.0.0.0`) | Dashboard reachable only from your Tailscale-enrolled devices; also prevents WebSocket hijack from malicious websites. Dashboard access additionally requires a pairing token introduced in recent OpenClaw versions. See ["ClawJacked" — The Hacker News](https://thehackernews.com/2026/02/clawjacked-flaw-lets-malicious-sites.html) for the real-world exploit (CVE-2026-25253) that targets gateways bound to `0.0.0.0`. |
 | Network | iptables DOCKER-USER rules | Sandbox containers cannot reach LAN, Tailscale nodes, or SSH |
 | Execution | Sandbox mode: `mode: all` | Agent commands run in throwaway containers, not on the host |
 | Execution | No `docker.sock` in sandbox | No container escape to host Docker daemon |
@@ -159,13 +158,17 @@ A layered defense. Each layer is described in detail when it appears in setup �
 | Filesystem | docker-compose bind mounts (explicit, narrow) | Agent's sandbox can only access the specific directories you mount — it cannot reach the rest of your host filesystem, config files, or other services |
 | Credentials | Separate dedicated service accounts | If a credential is compromised, the attacker's access is limited to that account's permissions on that one service — they cannot pivot to your personal email, other accounts, or other systems. The "blast" is the damage; the "radius" is how far it can spread. Separate accounts keep the radius small. |
 
+*A CVE (Common Vulnerabilities and Exposures) is a standardized identifier assigned to a publicly disclosed security vulnerability — essentially a bug-tracker entry for cybersecurity flaws, maintained by MITRE and referenced across the security industry. When a CVE is cited here, a link to coverage of the specific incident is provided so the reader can examine the details.*
+
 *When you encounter each of these in Modules 3–7, the "why" is already established here.*
 
 The gap between what is possible and what is commonly deployed is striking: a 2025 survey of deployed agentic AI systems found that the majority document no sandboxing or containment mechanisms at all. [*cite: "The 2025 AI Agent Index," MIT, arXiv 2602.17753, 2025*] We treat these layers as non-negotiable precisely because the default is to omit them.
 
-### 2.5 The Human-in-the-Loop Pattern
+### 2.5 Trust but Verify: Layered Review
 
-The **outbox pattern** is the cornerstone of supervised external action. The agent never directly sends email or posts to external channels — it writes a draft to a queue, a reviewer approves or rejects, and a deterministic cron script handles the actual sending.
+The long-term goal of a personal agent deployment is to remove yourself from routine decisions — not to keep you perpetually in the loop. But trust is earned, not assumed. We start with review at every consequential action and progressively delegate that review as we gain confidence in the agent's behavior.
+
+The **outbox pattern** is the mechanism: the agent writes a draft to a queue, a reviewer approves or rejects, and a deterministic cron script handles the actual sending. The reviewer is not always a human.
 
 ```
 Agent writes draft JSON → shared/outbox/  (status: "pending")
@@ -174,13 +177,17 @@ Deterministic cron script sends approved items → archives to sent/
 Full audit trail preserved in outbox / sent / rejected
 ```
 
-In our deployment we have implemented two variants of this pattern, reflecting different trust levels and task types:
+**The reviewer is a design choice, not a fixed role.** In our current deployment we use two tiers:
 
-- **Agent-to-agent review:** Outbound emails from one agent are placed in the shared outbox and reviewed by a second agent before sending. This agent reviewer checks for consistent criteria: appropriate language and tone, no more than a handful of emails per day to any single recipient, and recipients must already exist in the contacts database (Google People). This makes the review fast and deterministic enough to delegate.
+- **Agent review** for outbound email from our conference-tracking agent, whose messages are template-based with light natural language fills. The criteria are clear and consistent — appropriate language, no more than a handful of emails per day to any recipient, recipient must be in the contacts database — so a second agent can apply them reliably. This already operates without a human in the loop.
 
-- **Human review:** For more open-ended outbound communication — where the right action is less clear and the stakes are higher — a human reviews and approves. We are starting here while we develop a sense for how we want the agent to operate, and will gradually expand the scope of delegated review as we gain confidence.
+- **Human review** for outbound email from our Gmail agent, which reads an incoming message, interprets its context, and drafts a substantive reply. The judgment required is higher and the stakes of an error are greater. We review manually while we build a track record.
 
-This is a work in progress, not a final answer. The outbox pattern itself is the stable principle; the specific reviewer and review criteria will evolve with the deployment.
+As the Gmail agent's drafts prove consistently good over time, we will delegate review to a second agent — likely a smaller, cheaper reasoning model suited to the specific review task. This is also an economic design decision: a capable reasoning model for drafting, a lighter model for reviewing against known criteria, and human oversight only where neither suffices yet.
+
+**The principle generalizes beyond email.** Any agent action with real-world consequences — a Slack post to a public channel, an API call that creates or modifies an external record — should start with review enabled. The outbox pattern and the cron script that processes it are the implementation. The review criteria and the reviewer evolve as the deployment matures.
+
+This is a living architecture, not a final answer. What we describe here is our current state; it will change as our agents earn more autonomy.
 
 ### 2.6 Charter Summary
 Four principles that drive every decision in this talk:
@@ -708,5 +715,5 @@ Students will:
 
 [7] Yomtov, O. (Koi Security), "ClawHavoc: Large-Scale Poisoning Campaign Targeting the OpenClaw Skill Market," February 2026. Covered by Trend Micro, CyberPress, SecurityWeek, and others. *(Cited in §1.3 and §2.1 — real-world consequence of missing supply-chain discipline: ~20% of ClawHub registry compromised)*
 
-[8] SecurityScorecard STRIKE Team, "ClawJacked: WebSocket Hijack Vulnerability in OpenClaw Gateways Exposed to Internet," February 2026 (CVE-2026-25253). Covered by The Hacker News. *(Cited in §1.3 and §2.4 — 135,000+ publicly exposed instances; 15,000+ vulnerable to RCE; Tailscale binding is the direct mitigation)*
+[8] SecurityScorecard STRIKE Team, "ClawJacked: WebSocket Hijack Vulnerability in OpenClaw Gateways Exposed to Internet," February 2026 (CVE-2026-25253). [Coverage: The Hacker News](https://thehackernews.com/2026/02/clawjacked-flaw-lets-malicious-sites.html). *(Cited in §1.3 and §2.4 — 135,000+ publicly exposed instances; 15,000+ vulnerable to RCE; Tailscale binding is the direct mitigation)*
 
