@@ -2,21 +2,21 @@
 
 ## Contents
 
-| Module | Title | Time |
-|---|---|---|
-| 1 | What Is OpenClaw and Why This Approach? | 10 min |
-| 2 | The Design Charter | 15 min |
-| 3 | Platform Architecture and Model Choice | 15 min |
-| 4 | Agent Identity: The Workspace and the Sacred-8 Files | 15 min |
-| 5 | Scheduling: The Shell Owns the Clock | 12 min |
-| 6 | Separation of Responsibilities: Runbooks, Scripts, and Cron | 10 min |
-| 7 | Layered Oversight: The Outbox and Review Pattern | 8 min |
-| 8 | Integrations: Slack and Google | 6 min |
-| 9 | Lessons Learned | 5 min |
+| Module | Title |
+|---|---|
+| 1 | What Is OpenClaw and Why This Approach? |
+| 2 | The Design Charter |
+| 3 | Platform Architecture and Model Choice |
+| 4 | Agent Identity: The Workspace and the Sacred-8 Files |
+| 5 | Scheduling: The Shell Owns the Clock |
+| 6 | Separation of Responsibilities: Runbooks, Scripts, and Cron |
+| 7 | Layered Oversight: The Outbox and Review Pattern |
+| 8 | Integrations: Slack and Google |
+| 9 | Lessons Learned |
 
 ---
 
-## Module 1 — What Is OpenClaw and Why This Approach? *(10 min)*
+## Module 1 — What Is OpenClaw and Why This Approach?
 
 ### 1.1 What OpenClaw Is (and Isn't)
 - OpenClaw is an **agent framework** that provides persistent memory, tools, and communication channels to multiple agents, each implemented via a model
@@ -63,7 +63,7 @@ A central element of containment is the **sandbox**. When an agent executes a sc
 
 ---
 
-## Module 2 — The Design Charter *(15 min)*
+## Module 2 — The Design Charter
 
 > **This module is the foundation.** Every architecture decision in Modules 3–8 — sandboxing, iptables rules, the outbox pattern, SOUL.md, the scheduling design, the scaffolding — exists because of the principles established here. We cover it second, not last, because you should understand *why* before you are asked to execute *what*.
 
@@ -220,7 +220,7 @@ This is a living architecture, not a final answer. What we describe here is our 
 
 ---
 
-## Module 3 — Platform Architecture and Model Choice *(15 min)*
+## Module 3 — Platform Architecture and Model Choice
 
 ### 3.1 The Docker Stack
 
@@ -349,7 +349,7 @@ sudo iptables -L DOCKER-USER -n | grep DROP   # must show 3 rules
 
 ---
 
-## Module 4 — Agent Identity: The Workspace and the Sacred-8 Files *(15 min)*
+## Module 4 — Agent Identity: The Workspace and the Sacred-8 Files
 
 ### 4.1 The Workspace
 An agent's workspace is a directory of plain markdown files mounted into the OpenClaw gateway container. Everything the agent knows about itself, its user, its tools, and its duties lives in these files — readable, auditable, editable in any text editor, and (we recomment) version-controlled in git.  For long-term debugging and tuning, it's also good practice to keep a CHANGELOG.md file (or have your vibe-coding companion do so).
@@ -456,7 +456,7 @@ A **session** in OpenClaw is a conversation history file (`.jsonl`) stored in th
 
 ---
 
-## Module 5 — Scheduling: The Shell Owns the Clock *(12 min)*
+## Module 5 — Scheduling: The Shell Owns the Clock
 
 ### 5.1 The Core Principle
 
@@ -580,7 +580,7 @@ Nothing in this crontab requires the LLM to be running. The scheduling engine, o
 
 ---
 
-## Module 6 — Separation of Responsibilities: Runbooks, Scripts, and Cron *(10 min)*
+## Module 6 — Separation of Responsibilities: Runbooks, Scripts, and Cron
 
 Module 5 established that the shell owns the clock. This module establishes what happens below the LLM when the clock fires: a layered system of runbooks, deterministic scripts, and cron that handles everything procedural so the model never has to. These three layers, combined with the scheduling layer, are the scaffolding that makes our deployment reliable and maintainable. Each has a distinct role and a distinct location in the repository; this module maps the architecture to implementation.
 
@@ -633,7 +633,7 @@ Key properties of well-designed agent scripts:
 
 ---
 
-## Module 7 — Layered Oversight: The Outbox and Review Pattern *(8 min)*
+## Module 7 — Layered Oversight: The Outbox and Review Pattern
 
 The outbox/review/send pattern is our third scaffolding component, built on top of scheduling (Module 5) and deterministic scripts (Module 6). It is the mechanism by which the deployment earns the right to operate with progressively less human involvement. We start with review at every consequential outbound action. As behavior proves consistent and review criteria become well-defined, we delegate the reviewer role from human → supervisor agent → lighter model. The mechanism — the outbox directory, the JSON format, the cron-based sender — stays constant at every stage of that progression.
 
@@ -717,7 +717,7 @@ The deterministic send script and the append-only audit log are always present. 
 
 ---
 
-## Module 8 — Example Integrations: Slack and Google *(6 min)*
+## Module 8 — Example Integrations: Slack and Google
 
 ### 8.1 Slack
 
@@ -768,7 +768,7 @@ We use two different tools to reach Google services, for specific reasons:
 
 ---
 
-## Module 9 — Lessons Learned *(5 min)*
+## Module 9 — Lessons Learned
 
 These are not setup checklists or incident reports. Each is a general principle extracted from a specific problem — the kind of lesson that applies beyond the exact incident that generated it.
 
