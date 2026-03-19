@@ -20,39 +20,50 @@
 
 ### 1.2 What an Agent Actually Does (that a chatbot doesn't)
 - A chatbot waits for a question and answers it. An agent acts between conversations — on a schedule, in response to events, and on its own judgment about what to do next.
-- An agent can send your email, post to Slack, read your calendar, modify files, and call APIs — autonomously, while you sleep.
+- An agent can process and summarize (and send email), post to Slack, read your calendar, modify files, and call APIs — autonomously, while you sleep.
 - This is genuinely useful. It is also qualitatively different from a chatbot, and must be designed accordingly.
 - OpenClaw agents can be partially autonomous without being fully autonomous — calibrating that balance deliberately is an important facet of this tutorial.
 
-Out of the box, OpenClaw supports three types of triggers: **incoming messages** (a Slack DM, a channel message, a web dashboard conversation), **the heartbeat** (a periodic timer that fires every N minutes — the only proactive, non-reactive trigger native to OpenClaw), and **channel-specific events** like Slack reactions or mentions depending on configuration. The heartbeat is the closest thing to native scheduling, but it is blunt: it fires on every interval whether or not there is any work to do, and the agent must reason about what (if anything) to do each time — burning inference on the question hundreds of times a week. This gap is what our scheduling scaffolding (Module 5) was built to address.
+### 1.3 Our Scaffolding: Three Additions to OpenClaw
 
-### 1.3 Why "Safety-First"?
+OpenClaw provides the runtime and the channel integrations; we found three areas where a small amount of additional infrastructure significantly improves reliability, safety, and maintainability. Modules 5, 6, and 7 cover each in depth — here is the brief version.
+
+**Scheduling.** Out of the box, OpenClaw supports three types of triggers: incoming messages (a Slack DM, channel message, or web dashboard conversation), the heartbeat (a periodic timer — the only proactive trigger native to OpenClaw), and channel-specific events like Slack reactions. The heartbeat is blunt: it fires on every interval whether or not there is work to do, and the agent must reason about what (if anything) to do each time. With a 15-minute interval, that is 672 heartbeats per week for a task that fires once. We built a scheduling layer — a bash script, a CALENDAR.md file, and a TODO.md queue — that moves the scheduling decision entirely out of the LLM and into deterministic code. *(Module 5)*
+
+**Separation of responsibilities.** Models are excellent at judgment, composition, and natural language understanding. They are a poor fit for deterministic operations: fetching structured data from an API, counting rows, routing files, or deciding whether the current time matches a schedule. Mixing these concerns produces non-deterministic behavior and wastes inference budget. We separate them explicitly: code handles anything procedural, the LLM handles anything requiring judgment. Runbooks and scripts are the mechanism. *(Module 6)*
+
+**Layered oversight.** Any agent action with real-world consequences — sending email, posting to a channel, modifying external records — should go through a review step before execution. We implement this via an outbox/approval/send pattern: the agent queues a draft, a reviewer (another agent or a human) approves or rejects, and a deterministic cron script sends approved items. The goal is to start with review enabled everywhere and progressively delegate that review as confidence in agent behavior grows. *(Module 7)*
+
+### 1.4 Safety as a Design Principle
 - Security and containment have historically been afterthoughts with exciting new technology — something addressed after adoption, once incidents accumulate, rather than before. OpenClaw is no exception to this pattern. The platform is powerful, the demos are compelling, and the natural instinct is to get something running and worry about hardening later. Rapid adoption amplifies this risk: Jensen Huang remarked at GTC in March 2026 that OpenClaw is the fastest-adopted open source project of all time. [*verify and cite*] The faster a platform spreads, the faster it becomes a target.
 - The consequences are already well-documented. Module 2 presents a dedicated slide on real incidents — exposed instances, a skills registry poisoning campaign, and a remotely-exploitable vulnerability in improperly-bound gateways — all traceable to skipped hardening steps. The details are in Module 2; the point here is that they are not hypothetical.
 - We cover safety, containment, and alignment in Module 2 — before setup, before configuration, before anything else — because the decisions you make in the first hour determine the blast radius of everything that goes wrong later. Understanding the risks is part of understanding the platform.
 - **The right mental model:** your agent acts in your name. Every email it sends is from you. Every Slack post is from you. Design accordingly — not by neutering the agent, but by designing the right boundaries. *(Module 2 covers this in full.)*
 
-### 1.4 Architecture Summarized
+### 1.5 Architecture Summarized
 
-An OpenClaw deployment consists of one or more language models and a gateway, connected by a Docker internal network that is not exposed to the outside world. Each agent can be backed by a different model — the same gateway can run one agent on a local GPU and another on a cloud API — allowing you to match model capability and cost to each agent's actual needs. The gateway manages agent identities, conversation sessions, tool execution, and channel integrations (Slack, web dashboard, and others). Agent personality, memory, and task procedures live in plain markdown files in a workspace directory on the host — readable, auditable, and well-suited to version control.
+An OpenClaw deployment consists of one or more large language models (LLMs) and a gateway, connected by a Docker internal network that is not exposed to the outside world. Each agent can be backed by a different model — the same gateway can run one agent on a local GPU and another on a cloud API — allowing you to match model capability and cost to each agent's actual needs. The gateway manages agent identities, conversation sessions, tool execution, and channel integrations (Slack, web dashboard, and others). Agent personality, memory, and task procedures live in plain markdown files in a workspace directory on the host — readable, auditable, and well-suited to version control.
 
-**OpenClaw out of the box vs. our implementation:** It is important to distinguish what OpenClaw provides natively from what we have built on top of it. OpenClaw provides the gateway, the agent execution environment, the sandbox, and the channel integrations. It does not provide scheduling, cron-based automation, an email outbox/approval workflow, or per-agent model switching. Those are our additions — a scaffolding layer we built to make the deployment safe, reliable, and maintainable. Throughout this talk we will be explicit about where OpenClaw ends and our scaffolding begins. This distinction matters: our approach is not "how OpenClaw works out of the box" but "how we chose to deploy OpenClaw, and why we believe those choices are worth adopting."
+OpenClaw provides the gateway, the agent definition (characteristics, tasks, etc.) and execution environment, the sandbox, and many skills such as channel integrations (Slack, etc.). Using these capabilities, one can create multiple agents, each with a unique set of responsibilities, styles of interaction, and even cost/performance trade-offs where agents with simpler duties use lower-cost models and those with more important duties (e.g., reviewing the work of other agents) use frontier AI models.
 
-When an agent executes code or runs a script, it does so inside an ephemeral Docker sandbox container that is discarded after the task completes. That sandbox has only the network access you explicitly grant it — and we explicitly block it from reaching your LAN, other hosts, and SSH services via iptables rules. The gateway itself listens only on your Tailscale interface (a private VPN IP), making it unreachable from the public internet or your local network. Tailscale also provides HTTPS via its `serve` command, so the dashboard is accessible securely from your Tailscale-enrolled devices without opening any ports. (Tailscale is a prerequisite for this deployment; see [tailscale.com/download](https://tailscale.com/download) for installation.)
+Implementers are also responsible for developing their workflows, managing authentication with external services, and making decisions such as regarding routing of messages between an external service (e.g., Slack), and the agents that use that service. Implementers must also develop procedures that agents will follow, such as an email outbox/approval workflow or reporting data to groups via a Slack channel.
 
-Scheduling is entirely our own addition: cron scripts running on the host decide when to queue work; the model decides what to do with it. OpenClaw has no native scheduling support. This is part of the scaffolding we built and will describe in Module 5.
+We also found two areas where a small amount of additional infrastructure significantly improves the deployment. The first is scheduling (the heartbeat gap described in §1.3). The second is a mechanism to provide LLMs with deterministic tools: scripts that perform procedural tasks such as fetching email from the Gmail API, syncing rows between Google Sheets, or queuing a draft for approval. Both mechanisms follow the same design philosophy: keep the LLM doing what it does best, and use code for everything else. The third addition — layered oversight — builds on both. These are described in Modules 5, 6, and 7.
+
+A central element of containment is the **sandbox**. When an agent executes a script or shell command, OpenClaw spawns an ephemeral Docker container specifically for that execution — separate from the gateway container — and discards it when the command completes. This is standard OpenClaw behavior (configurable via `sandbox.mode` in `openclaw.json`); we enable it globally and layer iptables rules on top. Those rules block outbound connections from sandbox containers to your local network (LAN) and to the Tailscale virtual address range (100.64.0.0/10), preventing a compromised or misbehaving script from pivoting to other machines on your infrastructure. TCP port 22 (SSH) is blocked regardless of destination as an additional protection. Internet-bound connections — needed for calling Google APIs, the Anthropic API, and similar services — are permitted. The gateway itself is bound only to the host's Tailscale interface (not `0.0.0.0`), so the dashboard and agent API are reachable only from devices enrolled in your Tailscale network. (Tailscale is a prerequisite; see [tailscale.com/download](https://tailscale.com/download).)
 
 *The full architecture diagram and setup walkthrough are in Module 3.*
 
-### 1.5 What This Talk Covers
+### 1.6 What This Talk Covers
 
 1. The design charter: safety, containment, alignment, and separation of responsibilities
 2. Platform architecture and choosing your model
-3. Agent identity: the files that define each agent's persona, responsibilities, and operating procedures — the who, what, and how
+3. Agent identity: the files that define each agent's persona, responsibilities, and operating procedures
 4. Scheduling: why the shell owns the clock
-5. The scaffolding: runbooks, scripts, and cron
-6. Integrations: Slack and Google
-7. Lessons learned from a working deployment
+5. Separation of responsibilities: runbooks, scripts, and cron
+6. Layered oversight: the outbox and review pattern
+7. Integrations: Slack and Google
+8. Lessons learned from a working deployment
 
 *The hands-on lab (a separate session) puts this into practice using `OpenClaw-Gmail` as the worked example.*
 
@@ -60,16 +71,29 @@ Scheduling is entirely our own addition: cron scripts running on the host decide
 
 ## Module 2 — The Design Charter *(15 min)*
 
-> **This module is the foundation.** Every architecture decision in Modules 3–7 — sandboxing, iptables rules, the outbox pattern, SOUL.md, the scheduling design, the scaffolding — exists because of the principles established here. We cover it second, not last, because you should understand *why* before you are asked to execute *what*.
+> **This module is the foundation.** Every architecture decision in Modules 3–8 — sandboxing, iptables rules, the outbox pattern, SOUL.md, the scheduling design, the scaffolding — exists because of the principles established here. We cover it second, not last, because you should understand *why* before you are asked to execute *what*.
+
+### The Five Principles (§2.1–2.5)
+
+Five principles drive every design and implementation decision in this deployment. Each is explained in the subsections that follow.
+
+1. **Know the threat model** — understand the attack surface before building defenses; the threats are not hypothetical. *(§2.1)*
+2. **Alignment** — encode behavioral invariants structurally before connecting any tools, and reinforce them with mechanical constraints that do not depend on the LLM reasoning correctly. *(§2.2)*
+3. **Separation of responsibilities** — anything deterministic or procedural is implemented in code; anything requiring judgment, creativity, or language is handled by the model. *(§2.3)*
+4. **Containment** — network, execution, filesystem, and config isolation are in place before anything external is connected. *(§2.4)*
+5. **Trust but Verify** — any action with real-world consequences goes through a review layer; the reviewer and criteria evolve as confidence grows. *(§2.5)*
+
+---
 
 ### 2.1 The Threat Model
-Four risk categories when running an autonomous agent. These are not hypothetical:
+
+These five risk categories apply to any autonomous agent system with tool access and external connectivity — they are not specific to OpenClaw. We considered each explicitly when designing our deployment.
 
 1. **Prompt injection** — malicious content in email, files, or Slack instructs the agent to execute unintended commands. The agent cannot distinguish a legitimate instruction from one embedded in adversarial input unless the system is designed to limit what it can do with that input. This is a structural vulnerability: current LLMs do not enforce separation between instructions they are meant to execute and data they are meant to process. [*cite: Zverev et al., "Can LLMs Separate Instructions From Data?", ICLR 2025*]
 
 2. **Lateral movement** — a sandbox container that can reach your LAN, other Tailscale nodes, or SSH services can be used as a pivot point. This is especially relevant when the agent's sandbox runs on a machine that also has access to other internal services.
 
-3. **Runaway external actions** — the agent takes actions with real-world consequences without human review: sending email, posting to public channels, modifying files, or changing configuration. A mistake (such as deleting files or changing configs) by an agent is not intentionally malicious, but is the model trying to be helpful, where "helpful" was not bounded precisely enough. A common example: ask the agent to diagnose a problem and it will often try to fix it, touching things you did not ask it to touch. *(This is Lesson 4 in Module 8.)*
+3. **Runaway external actions** — the agent takes actions with real-world consequences without human review: sending email, posting to public channels, modifying files, or changing configuration. A mistake (such as deleting files or changing configs) by an agent is not intentionally malicious, but is the model trying to be helpful, where "helpful" was not bounded precisely enough. A common example: ask the agent to diagnose a problem and it will often try to fix it, touching things you did not ask it to touch. *(This is Lesson 4 in Module 9.)*
 
 4. **Credential exfiltration** — API keys, OAuth tokens, and other secrets passed to the sandbox can leak via outbound HTTP if the sandbox has unrestricted network access.
 
@@ -81,9 +105,9 @@ Alignment is ensuring that a system's goals, values, methods, and behavior remai
 
 Our approach has two complementary components:
 
-**Structural bounds:** We limit what the agent can do regardless of what it decides to try. Sandbox containment, the outbox approval workflow, disabled config writes, and network isolation are mechanical constraints — the agent cannot break them by being confused, mistaken, or instructed otherwise. Structural bounds are the most reliable form of alignment because they do not depend on the model reasoning correctly.
+- **Structural bounds:** We limit what the agent can do regardless of what it decides to try. Sandbox containment, the outbox approval workflow, disabled config writes, and network isolation are mechanical constraints. The agent cannot break them by being confused, mistaken, or instructed otherwise. Structural bounds are the most reliable form of alignment because they do not depend on the model reasoning correctly.
 
-**Behavioral invariants via SOUL.md:** For the cases that structural bounds do not cover — tone, judgment, deference, how to handle ambiguity — we encode explicit behavioral invariants in `SOUL.md`. The key property of `SOUL.md` is that it is one of the 8 files OpenClaw loads into every inference call, every time, unconditionally. An alignment constraint that lives in a secondary file may not be in context when the agent makes a decision. One in `SOUL.md` always is.
+- **Behavioral invariants via SOUL.md:** For the cases that structural bounds do not cover (e.g., tone, judgment, deference, how to handle ambiguity), we encode explicit behavioral invariants in `SOUL.md`. This is one of the 8 files OpenClaw loads into every inference call, every time, unconditionally. An alignment constraint that lives in a secondary file may not be in context when the agent makes a decision. One in `SOUL.md` always is.
 
 Essential invariants to establish in `SOUL.md` before connecting any external service:
 - **Stop means stop.** "DO NOT PROCEED," "WAIT," and "STOP" are not invitations to acknowledge and continue. They mean halt and report.
@@ -97,7 +121,9 @@ Essential invariants to establish in `SOUL.md` before connecting any external se
 
 > **Anything deterministic or purely procedural is implemented in code. Anything requiring judgment, creativity, or natural language understanding or generation is handled by the model. The boundary between them must be sharp and explicit.**
 
-This is the architectural principle that generates the entire scaffolding of runbooks, scripts, and cron jobs built in Modules 5 and 6. The case for it rests on several independent factors: reliability (code produces the same output for the same input, every time), auditability (you can read exactly what a script does), testability (you can write a unit test for a script; you cannot unit-test an LLM instruction), and token efficiency (deterministic operations that run hundreds of times a week should not consume inference budget).
+This is the architectural principle underpins the implementation we introduce here and describe in detail later: runbooks, scripts, and cron jobs. The rationale rests on several independent factors: reliability (code produces the same output for the same input, every time), auditability (you can read exactly what a script does), testability (you can write a unit test for a script; you cannot unit-test an LLM instruction), and token efficiency (deterministic operations that run hundreds of times a week should not consume inference budget).
+
+**Surely by now we can trust advanced reasoning models to perform simple procedures?** If not now, then soon, but the use of code for procedural, deterministic tasks aligns with tool use and separation of responsibilities to match the best model is the rationale to Mixture of Experts models.  The point is to improve model performance and skills by matching tasks with the best (w.r.t. cost, reliability, or other factors) components. Frontier AI models continue to improve rapidly and will increasingly be capable of handling scheduling, state management, and procedural tasks more reliably. As they do, the right boundary between code and model will shift. The habit of thinking clearly about which layer owns which responsibility will remain valuable regardless — even if the specific boundary moves.
 
 The two sides of the boundary:
 
@@ -119,11 +145,10 @@ Three recent papers converge on this same conclusion from different angles, prov
 
 The token efficiency argument is quantified concretely in Module 5 with a table showing waste rates for common scheduling patterns.
 
-**A note on where the field is going:** Language models are improving rapidly and will increasingly be capable of handling scheduling, state management, and procedural tasks more reliably. As they do, the right boundary between code and model will shift. The habit of thinking clearly about which layer owns which responsibility will remain valuable regardless — even if the specific boundary moves.
 
-**The scaffolding this principle generates:**
+**Implementation here is a layered approach:**
 
-The LLM sits atop three layers of deterministic scaffolding. Each layer calls down only — the LLM invokes runbooks, runbooks invoke scripts, scripts are triggered by cron. Information flows back up; control flows down.
+The LLM sits atop three layers of deterministic functionality. Each layer calls down only: the LLM invokes runbooks, runbooks invoke scripts, scripts are triggered by cron. Information flows back up; control flows down.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -158,26 +183,32 @@ A layered defense. Each layer is described in detail when it appears in setup �
 | Filesystem | docker-compose bind mounts (explicit, narrow) | Agent's sandbox can only access the specific directories you mount — it cannot reach the rest of your host filesystem, config files, or other services |
 | Credentials | Separate dedicated service accounts | If a credential is compromised, the attacker's access is limited to that account's permissions on that one service — they cannot pivot to your personal email, other accounts, or other systems. The "blast" is the damage; the "radius" is how far it can spread. Separate accounts keep the radius small. |
 
-**A note on sandbox architecture:** The OpenClaw gateway is a long-running Docker container that hosts the agent runtime and dashboard. When the agent runs an exec command (a script, a shell command), OpenClaw spawns a separate, ephemeral Docker container for that execution — this is the "sandbox." The gateway container itself can reach Tailscale (it needs to for the dashboard and Slack); the sandbox containers are what the iptables rules restrict. Internet access (Google APIs, Anthropic API, etc.) is permitted from sandbox containers — agents need it to call external services. Only LAN and Tailscale node access is blocked, preventing lateral movement to other machines on your network. *(See FIXES.md for notes on further egress hardening if desired.)*
+**A note on sandbox architecture and network isolation.** The OpenClaw gateway is a long-running Docker container. When the agent executes a script or shell command, OpenClaw spawns a separate, ephemeral Docker container for that execution — the sandbox — which is discarded when the command completes. The gateway and sandbox containers communicate over a Docker-internal bridge network.
 
-*A CVE (Common Vulnerabilities and Exposures) is a standardized identifier assigned to a publicly disclosed security vulnerability — essentially a bug-tracker entry for cybersecurity flaws, maintained by MITRE and referenced across the security industry. When a CVE is cited here, a link to coverage of the specific incident is provided so the reader can examine the details.*
+The iptables rules operate at the IP layer (L3) on the host. They block outbound connections from Docker-subnet traffic (the containers) to two destination ranges: (1) your LAN subnet (e.g., 10.0.4.0/22), and (2) the Tailscale CGNAT virtual address range (100.64.0.0/10). A third rule blocks TCP port 22 (SSH) outbound regardless of destination IP. These rules prevent a script running in a sandbox from making TCP connections to other machines on your local network or to the virtual IPs assigned by Tailscale to your enrolled devices.
 
-*When you encounter each of these in Modules 3–7, the "why" is already established here.*
+Critically, these rules do not block outbound connections to the public internet. Sandbox containers can reach external services — Google APIs, the Anthropic API, Slack webhooks — over standard HTTPS. That is intentional and necessary.
 
-The gap between what is possible and what is commonly deployed is striking: a 2025 survey of deployed agentic AI systems found that the majority document no sandboxing or containment mechanisms at all. [*cite: "The 2025 AI Agent Index," MIT, arXiv 2602.17753, 2025*] We treat these layers as non-negotiable precisely because the default is to omit them.
+Tailscale operates as a WireGuard-based overlay network (L3 VPN). It assigns virtual IP addresses in the 100.64.0.0/10 CGNAT range to each enrolled device and creates a `tailscale0` virtual interface on the host. The OpenClaw gateway port is bound to the host's Tailscale IP address, not to 0.0.0.0. Traffic reaching that port therefore arrives only via the Tailscale interface — meaning only from devices enrolled in your Tailscale network. The iptables rules ensure that containers cannot forge connections to those virtual IPs and thereby bypass the network isolation. *(See FIXES.md for notes on further egress hardening if needed.)*
+
+*CVE (Common Vulnerabilities and Exposures) identifiers are standardized labels assigned to publicly-disclosed security vulnerabilities, maintained by MITRE. Links to original coverage are provided for each CVE cited.*
+
+There is a growing body of "how-to" material for deploying OpenClaw, and it is striking how little attention is paid to security and containment. A 2025 survey — [The 2025 AI Agent Index](https://arxiv.org/abs/2602.17753) (MIT) — found that the majority of deployed agentic AI systems document no sandboxing or containment mechanisms at all. We treat the layers above as non-negotiable precisely because the default is to omit them.
 
 ### 2.5 Trust but Verify: Layered Review
 
-The long-term goal of a personal agent deployment is to remove yourself from routine decisions — not to keep you perpetually in the loop. But trust is earned, not assumed. We start with review at every consequential action and progressively delegate that review as we gain confidence in the agent's behavior.
+The long-term goal of a personal agent deployment is to remove yourself from routine decisions — not to keep you perpetually in the loop. But trust is earned, not assumed. We start with review at every consequential action and progressively delegate that review as we gain confidence that the agent's behavior aligns with the intent encoded in its descriptor files (more in §4).
 
-The **outbox pattern** is the mechanism: the agent writes a draft to a queue, a reviewer approves or rejects, and a deterministic cron script handles the actual sending (if approved). The reviewer is either another agent assigned to the task or a human.
+The **outbox pattern** is the mechanism we use for review.  An agent writes a draft to queue in an outbox folder (shared among agents), a reviewer approves or rejects, and a cron script handles the actual sending (if approved). The reviewer is either another agent assigned to the task (with precise revivew criteria)  or a human.
 
 ```
-Agent writes draft JSON → shared/outbox/  (status: "pending")
-Reviewer approves or rejects → marks status accordingly
-Deterministic cron script sends approved items → archives to sent/
-Full audit trail preserved in outbox / sent / rejected
+Agent writes draft JSON → outbox/  (status: "pending")
+Reviewer approves → updates JSON in-place (status: "approved", approved_at: <ts>)
+Reviewer rejects  → updates JSON, moves file to rejected/ (includes rejected_reason)
+Cron script sends approved drafts → moves to sent/; logs to send-email.log
 ```
+
+Approved drafts move from `outbox/` to `sent/`. Rejected drafts move to `rejected/` with a `rejected_reason` field written by the reviewer, and a Slack DM is sent to the operator explaining the rejection. The `send-email.log` provides a timestamped delivery record. The complete mechanism — JSON format, review criteria, directory structure, logging — is covered in Module 7.
 
 In our system we have three agents: a supervisory agent (reviewer as needed), a clerical agent (currnetly tracking submissions to web forms and creating reports on submissions to notify humans via Slack and email), and a Gmail assist agent (work in progress to help manage email, calendar, tasks).
 
@@ -189,17 +220,9 @@ In our system we have three agents: a supervisory agent (reviewer as needed), a 
 
 As the Gmail agent's drafts prove consistently good over time, we will delegate review to a second agent — likely a smaller, cheaper reasoning model suited to the specific review task. This is also an economic design decision: a capable reasoning model for drafting, a lighter model for reviewing against known criteria, and human oversight only where neither suffices yet.
 
-**The principle generalizes beyond email.** Any agent action with real-world consequences — a Slack post to a public channel, an API call that creates or modifies an external record — should ideally start with review enabled. The outbox pattern is the mechanism; the review criteria and the reviewer evolve as the deployment matures. Implementation details are in Modules 5 and 6.
+**The principle generalizes beyond email.** Any outbound action with real-world consequences — a Slack post to a public channel, an API call that modifies an external record — can use the same pattern. We have partially implemented this for Slack (a `slack-outbox/` and `slack-sent/` directory exist; a review step is not yet in place). Module 7 covers the full pattern, including how to extend it to other channels.
 
 This is a living architecture, not a final answer. What we describe here is our current state; it will change as our agents earn more autonomy.
-
-### 2.6 Charter Summary
-Four principles that drive design and implementation decisions in this deployment:
-
-1. **Separation of responsibilities** — anything deterministic or procedural is implemented in code; anything requiring judgment, creativity, or language is handled by the model. The boundary is sharp and explicit.
-2. **Containment** — network, execution, filesystem, and config isolation are in place before anything external is connected.
-3. **Alignment** — behavioral invariants are established in `SOUL.md` before the agent is given tools, and are reinforced by structural bounds that do not depend on the model reasoning correctly.
-4. **Trust but Verify** — any action with real-world consequences goes through an approval queue; a human or designated reviewer confirms before execution.
 
 ---
 
@@ -241,14 +264,14 @@ In our deployment we use a local GPU for some agents and a cloud API for others 
 
 ### 3.3 Quick and Easy Model Switch 
 
-In order to make it easy to swamp models in for individual or all agents, we created a config.yaml to specify which model to use for each agent, and a set of scripts to push those assignments into OpenClaw.
+In order to make it easy to swap models in for individual, multiple, or all agents, we created a config.yaml to specify which model to use for each agent, and a set of scripts to push those assignments into OpenClaw.
 
-OpenClaw stores per-agent model assignments inside `openclaw.json` — a large JSON configuration file that lives inside the running gateway container. Editing it directly means either using the dashboard's small JSON editor or manually extracting the file, editing it, copying it back, and restarting the gateway. For a single change that's manageable; for experimenting across agents and providers it becomes tedious and error-prone.
+OpenClaw stores per-agent model assignments inside `openclaw.json` — a large JSON configuration file that lives inside the running gateway container. Editing it directly means either using the dashboard's small JSON editor window or manually extracting the file, editing it, copying it back, and restarting the gateway. For a single change that's manageable; for experimenting across agents and models it becomes tedious and error-prone.
 
-Our solution: `config.yaml`, a small human-readable file that lives in the infrastructure repo alongside your other config. `apply-config.sh` reads it, patches `openclaw.json` in the container, and restarts the gateway. The source of truth for model assignments is `config.yaml`, not the raw JSON.
+Our solution: `config.yaml`, a small human-readable file that lives in the infrastructure repo alongside your other config. `apply-config.sh` reads it, patches `openclaw.json` in the container, and restarts the gateway. The source of truth for model assignments is `config.yaml`, not the raw JSON.  We expect that over time we will find other configuration details that would be handy to pull out into config.yaml for the same reason.
 
 ```yaml
-# config.yaml — per-agent model assignments (our scaffolding, not native OpenClaw)
+# Example of config.yaml — per-agent model assignments 
 agents:
   main:
     model: anthropic/claude-sonnet-4-6    # cloud API
@@ -275,34 +298,41 @@ Applies the patch to `openclaw.json` and restarts the gateway. Do not run both c
 
 **Reverting to a known-good configuration:** Before experimenting with a new model or provider, save your current working `config.yaml` as `config.yaml.stable`. If an experiment goes wrong — a model behaves poorly, you exhaust API credits, a provider has an outage — restore `config.yaml.stable` and run `apply-config.sh`. This pattern works whether your stable baseline is a local model or a cloud provider.
 
+A key point: model assignment is not a permanent choice (and no one should be forced to edit 2-300 line json files in a tiny browswer edit window). Any agent can be switched to a different model in under 30 seconds without touching `docker-compose.yml` or fiddling with the dashboard or any other configuration.
 
-The key point: model assignment is not a permanent choice. Any agent can be switched to a different model in under 30 seconds without touching `docker-compose.yml` or fiddling with the dashboard or any other configuration.
-
-### 3.4 Repository Structure
+### 3.4 Structure of this Repository
 
 This repository is structured so that you can implement OpenClaw and an initial set of agents. The structure separates the OpenClaw and (if used) local model configurations -- the platform -- and the agent-specific configurations.
 
 ```
 OpenClaw-Tutorial/               ← your private repo
-├── spark-ai/                    ← companion public repo (submodule or clone)
+├── gateway/                     ← platform config (from spark-ai)
 │   ├── docker-compose files
 │   ├── config.yaml              # model assignments — edit this
 │   ├── secrets.yaml             # gitignored — API keys
 │   └── apply-config.sh
-└── gmail-agent/                 ← from OpenClaw-Gmail, parameterized for you
-    ├── IDENTITY.md
+├── main/                        ← supervisory agent workspace
+│   ├── SOUL.md
+│   ├── IDENTITY.md
+│   ├── TOOLS.md
+│   ├── EMAIL.md                 # outbox review criteria
+│   ├── HEARTBEAT.md             # includes outbox review step
+│   ├── ...                      # other Sacred Eight files
+│   └── runbooks/
+└── gmail-agent/                 ← Gmail assist agent workspace (from OpenClaw-Gmail)
     ├── SOUL.md
+    ├── IDENTITY.md
     ├── TOOLS.md
-    ├── ...                      # the 8 auto-loaded files
+    ├── ...                      # Sacred Eight files + CALENDAR.md, PATHS.md, etc.
     ├── runbooks/
-    └── scripts/
+    └── scripts/                 # gmail_api.py, contacts_api.py, etc.
 ```
 
-The tutorial starts with two agents: `main` (the supervisory agent, responsible for outbox review among other duties) and `gmail-agent` (the Gmail assistant). This two-agent setup is the minimum needed to demonstrate the review workflow end-to-end.
+The `main` agent is the supervisor: it reviews outbox drafts from `gmail-agent` and handles administrative tasks. `gmail-agent` handles email reading, drafting, and contacts. This two-agent setup is the minimum needed to demonstrate the full review workflow end-to-end.
 
 ### 3.5 Security Hardening Checklist
 
-Done once, before connecting any external service. Four verifications before calling the platform ready:
+Done once, before connecting any external service. Four verifications before calling the platform ready. These test the protections we have built into this deployment, but this does not meant that the system is involnerable - all of this is a work in progress.  But you are still better off with these protections and without them!
 
 ```bash
 # vLLM NOT exposed to host network
@@ -323,7 +353,7 @@ sudo iptables -L DOCKER-USER -n | grep DROP   # must show 3 rules
 ## Module 4 — Agent Identity: The Workspace and the Sacred-8 Files *(15 min)*
 
 ### 4.1 The Workspace
-An agent's workspace is a directory of plain markdown files mounted into the OpenClaw gateway container. Everything the agent knows about itself, its user, its tools, and its duties lives in these files — readable, auditable, editable in any text editor, and version-controlled in git.
+An agent's workspace is a directory of plain markdown files mounted into the OpenClaw gateway container. Everything the agent knows about itself, its user, its tools, and its duties lives in these files — readable, auditable, editable in any text editor, and (we recomment) version-controlled in git.  For long-term debugging and tuning, it's also good practice to keep a CHANGELOG.md file (or have your vibe-coding companion do so).
 
 OpenClaw automatically loads eight of these files into the system prompt on every inference call for the agent. Everything else (task-specific guidance, etc.) is invisible to the model unless the agent explicitly reads it with a tool call.  These eight files define the agent's identify, personality, style, and roles.
 
@@ -344,11 +374,11 @@ OpenClaw automatically loads eight of these files into the system prompt on ever
 
 **Everything else is NOT auto-loaded:** `CALENDAR.md`, `EMAIL.md`, `PATHS.md`, `CHANNELS.md`, runbooks, templates — invisible unless the agent reads them explicitly. More on this shortly.
 
-### 4.2 What Each File Should (and Should Not) Contain
+### 4.2 Recommendations on What Each File Should (and Should Not) Contain
 
-*Content strategy — what goes where and why — is covered here. The risks of getting it wrong (duplicated facts, drifting instructions) are treated in §4.4.*
+*Content strategy — what goes where and why — is covered here. The risks of getting it wrong (duplicated facts, drifting instructions) are treated in §4.4.  In this repository each of these files contain initial boilerplate that you should review and customize.*  
 
-**`SOUL.md`** holds the behavioral invariants that must hold unconditionally. If a rule must never be violated, it belongs here — not in a secondary file. Keep it focused: this is constitutional law, not policy.
+**`SOUL.md`** describes the behavioral invariants that must hold unconditionally. If a rule must never be violated, it belongs here — not in a secondary file. Keep it focused: these are principles, not comprehensive rules for every conceivable situation. 
 
 **`IDENTITY.md`** describes who the agent is — its name, its Slack behavior contract, and a concise list of its recurring duties. Duties are listed here (what and when), but the how belongs in runbooks (read separately, covered in Module 6). Do not duplicate rules from SOUL.md here — reference them.
 
@@ -506,7 +536,7 @@ TZ=America/Chicago
 */5  * * * *  check-todos.sh           # promote due CALENDAR entries and past-due
                                         # TODO entries to READY; zero LLM tokens
 
-# ── Outbox processing (see §2.5) ─────────────────────────────────────────────
+# ── Outbox processing (see §7.2) ─────────────────────────────────────────────
 */30 * * * *  send-approved-emails.sh  # send approved outbox drafts via Gmail API;
                                         # move to sent/; archive rejected/
 
@@ -574,9 +604,81 @@ Key properties of well-designed agent scripts:
 
 ---
 
-## Module 7 — Integrations: Slack and Google *(8 min)*
+## Module 7 — Layered Oversight: The Outbox and Review Pattern *(8 min)*
 
-### 7.1 Slack
+### 7.1 Why a Dedicated Review Layer?
+
+The outbox/review/send pattern is our third scaffolding component, built on top of both scheduling (Module 5) and deterministic scripts (Module 6). It deserves its own module because it is the primary mechanism by which the deployment earns the right to operate autonomously — and because it touches every outbound channel.
+
+The goal is progressive delegation. We start with review everywhere. As agent behavior proves consistent and the review criteria become well-defined, we promote the reviewer from human → supervisor agent → lighter/cheaper model. The mechanism — the outbox directory, the JSON format, the cron-based sender — stays the same at every stage.
+
+### 7.2 The Email Outbox — Mechanism in Detail
+
+**JSON format** (written by the drafting agent, atomic write via `.tmp` rename):
+```json
+{
+  "to": "recipient@example.com",
+  "subject": "Subject line",
+  "body": "Full email body, plain text",
+  "from_agent": "gmail-agent",
+  "context": "Why this email is being sent (for reviewer only, not sent)",
+  "status": "pending",
+  "created_at": "2026-04-07T14:00:00Z"
+}
+```
+
+**After approval** (reviewer updates in-place via `jq`, never manual JSON edit):
+```json
+{ ..., "status": "approved", "approved_at": "2026-04-07T14:03:00Z" }
+```
+
+**After rejection** (reviewer updates and moves to `rejected/`):
+```json
+{ ..., "status": "rejected", "rejected_at": "...", "rejected_reason": "Rate limit: 10 emails/24h to this recipient" }
+```
+
+**Directory structure:**
+```
+shared/
+├── outbox/        ← pending drafts (status: pending)
+├── sent/          ← delivered emails (archived by cron after send)
+└── rejected/      ← rejected drafts with reason field
+```
+
+**`send-approved-emails.sh`** (cron, every 30 min): scans `outbox/` for `status: approved`, sends via Gmail API, moves to `sent/`, logs to `send-email.log`. Recipients must be in Google Contacts — the script re-checks at send time and silently drops unknowns.
+
+**Review criteria** (defined in the supervisor agent's `EMAIL.md`, applied during heartbeat):
+- No more than 10 emails per 24 hours to any single recipient
+- Recipient must exist in the Google Contacts database
+- Appropriate language and tone per the agent's writing guidelines
+- Rejection immediately triggers a Slack DM to the operator with reason and override option
+
+### 7.3 The Slack Outbox — Partially Implemented
+
+The same pattern applies to Slack posts. The directory structure exists (`shared/slack-outbox/`, `shared/slack-sent/`, `send-slack.log`); a review step is not yet implemented (Slack posts currently go directly to the channel after agent composition). Completing the pattern would add:
+- A reviewer step (supervisor agent or human) between composition and `send-slack-posts.sh`
+- A `slack-rejected/` directory with rejection reasons
+- The same rate-limit and content criteria applied to email
+
+The same pattern can be extended to any other outbound channel supported by OpenClaw (Telegram, SMS via MacOS, etc.).
+
+### 7.4 The Pattern Is the Architecture
+
+| Component | Email (implemented) | Slack (partial) | Other channels |
+|---|---|---|---|
+| Agent writes to | `outbox/<file>.json` | `slack-outbox/<file>.json` | `<channel>-outbox/` |
+| Reviewer reads | `EMAIL.md` criteria | *(not yet defined)* | Define per channel |
+| Send script | `send-approved-emails.sh` | `send-slack-posts.sh` | Add per channel |
+| Archive | `sent/`, `rejected/` | `slack-sent/` | Add per channel |
+| Audit log | `send-email.log` | `send-slack.log` | Add per channel |
+
+The deterministic send script and the append-only audit log never change. The reviewer, the review criteria, and the channel are the variables.
+
+---
+
+## Module 8 — Integrations: Slack and Google *(6 min)*
+
+### 8.1 Slack
 
 **Setup requirements:**
 - Slack app at api.slack.com/apps with Socket Mode enabled
@@ -590,7 +692,7 @@ Key properties of well-designed agent scripts:
 - Agent writes JSON to `shared/slack-outbox/` (channel, text, status: "pending")
 - `send-slack-posts.sh` (cron, every 5 minutes) posts via `chat.postMessage` and archives
 
-### 7.2 Google — Two Integration Paths
+### 8.2 Google — Two Integration Paths
 
 We use two different tools to reach Google services, for specific reasons:
 
@@ -611,7 +713,7 @@ We use two different tools to reach Google services, for specific reasons:
 
 ---
 
-## Module 8 — Lessons Learned *(5 min)*
+## Module 9 — Lessons Learned *(5 min)*
 
 These are not setup checklists or incident reports. Each is a general principle extracted from a specific problem — the kind of lesson that applies beyond the exact incident that generated it.
 
@@ -742,7 +844,7 @@ Students will:
 
 ---
 
-*Outline version: 2026-03-18 rev 5.*
+*Outline version: 2026-03-18 rev 6.*
 
 ---
 
