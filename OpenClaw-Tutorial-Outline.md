@@ -724,6 +724,18 @@ Key properties of well-designed agent scripts:
 - `gmail_api.py` — search and fetch email via Gmail API; stdlib only
 - `contacts_api.py` — search and create contacts via Google People API; stdlib only
 - `notify.py` — compose and queue outbox email; calls LLM API directly for composition
+- `sync-track-sheets.py` — read master Google Sheet, route new submissions to per-track sheets; fully deterministic, no LLM
+
+**Dry-run mode as standard practice.** Any script that modifies external state (writes to Google Sheets, queues emails, posts to Slack) should support a `--dry-run` flag that exercises all reads but skips all writes. This is especially important for pipelines that run on a daily cron schedule — a bug introduced by a change to the script may not surface until the next scheduled run, potentially 24 hours later. A dry run lets you verify the full pipeline immediately after a change.
+
+In our notify pipeline, `run-notify.sh --dry-run`:
+- Reads all Google Sheets normally (tests connectivity and data access)
+- Skips all `gog_append` calls — track sheets are not modified; the next real run still detects the same submissions as new
+- Skips the `wg-bof-state.json` state write — preserves the baseline for the next real run
+- Posts the Slack summary to `#openclaw-test` (configured in `config.yaml` under `notify: dry_run_slack_channel_id`) with a `[DRY RUN]` banner
+- Writes emails to outbox redirected to the system owner (configured in `config.yaml` under `notify: system_owner_email`) with `[DRY RUN]` subject prefix — the full outbox/send pipeline is exercised
+
+The test channel and system owner email live in `config.yaml` so they can be changed for a new deployment without touching the scripts themselves. `run-notify.sh` extracts these values at startup and passes them as environment variables into the Docker container.
 
 ---
 
