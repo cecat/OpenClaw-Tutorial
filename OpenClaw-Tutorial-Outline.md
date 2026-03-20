@@ -739,27 +739,23 @@ The test channel and system owner email live in `config.yaml` so they can be cha
 
 **`--test` for composition verification.** `--dry-run` exercises the full pipeline against real Google Sheets data. A complementary `--test` flag uses a built-in fake-submission fixture so the pipeline can be run at any time — even when there are no new real submissions — to verify LLM output format and email structure without touching Sheets, the outbox, or Slack. This is especially useful after prompt or template changes. Note: `--test` must be run via `run-notify.sh --test` (not `python3 notify.py --test` directly) because the LLM endpoint `nim:8000` is only accessible inside the Docker container network.
 
-**Smoke-test checklist after any notify.py change** (also useful for verifying a new deployment). Run from `~/code/spark-ai-agents` on spark-ts. Tests 1–2 have no external side effects and can be run freely. Tests 3–4 produce real external output (email to system owner, Slack post to `#openclaw-test`) but make no sheet writes and send no emails to real recipients.
+**Smoke-test suite after any notify.py change** (also useful for verifying a new deployment). A single script runs all five tests and prints a clear PASS/FAIL summary — no need to read through log output. Run from `~/code/spark-ai-agents` on spark-ts:
 
 ```bash
-# Test 1 - Verify email composition and LLM warm sentence using built-in fixture (no external calls)
-scripts/run-notify.sh --test
+scripts/run-tests.sh
 ```
 
-```bash
-# Test 2 - Verify Google Sheets connectivity and Slack post to #tpc-openclaw (no emails queued)
-scripts/run-notify.sh --no-email
-```
+The five tests and what each covers:
 
-```bash
-# Test 3 - Verify full pipeline end-to-end: real Sheets data, email to system owner, Slack to #openclaw-test (no sheet writes, no emails to real recipients)
-scripts/run-notify.sh --dry-run
-```
+| Test | What it checks | External side effects |
+|------|---------------|----------------------|
+| Test 1 | Email composition and LLM warm sentence — uses built-in fixture, output to stdout | None |
+| Test 2 | Google Sheets connectivity and Slack post to `#tpc-openclaw` | Slack post to `#tpc-openclaw` |
+| Test 3 | Full pipeline dry-run: real Sheets, Slack to `#openclaw-test`, email to system owner if new submissions exist | Slack post to `#openclaw-test`; email to system owner if new items |
+| Test 4 | Log check — scans last 100 entries for ERROR/ABORT/FAIL lines | None |
+| Test 5 | Outbox → Gmail send pipeline — writes a dummy approved email to the outbox and confirms it reaches `sent/` | Email to system owner |
 
-```bash
-# Test 4 - Check logs for warnings or errors from the above runs
-tail -50 ~/code/spark-ai-agents/shared/logs/notify.log
-```
+Tests 3 and 5 make no sheet writes and send no emails to real recipients. The test suite exits with a one-line summary: `ALL TESTS PASSED` or `N TEST(S) FAILED` with per-test details for any failures.
 
 ---
 
@@ -806,11 +802,11 @@ shared/
 └── rejected/      ← rejected drafts; rejected_reason field in each JSON file
 ```
 
-**`send-approved-emails.sh`** (cron, every 30 min — our addition, not native OpenClaw): scans `outbox/` for files with `status: approved`, sends via Gmail API, moves to `sent/`, appends to `shared/logs/email-send.log`. Recipients are re-checked against Google Contacts at send time; unknowns are dropped silently and logged.
+**`send-approved-emails.sh`** (cron, every 30 min — our addition, not native OpenClaw): scans `outbox/` for files with `status: approved`, sends via Gmail API, moves to `sent/`, appends to `shared/logs/email-send.log`. Recipient resolution at send time: if the outbox JSON contains a `to_name` field (full name), the script calls `gog contacts search` to look up the email address from Google Contacts — Google Contacts is the single source of truth for email addresses. If the name is not found, the email is moved to `rejected/` with a clear log entry. If the outbox JSON contains a `to` field (email address directly, used for dry-run overrides), it is used as-is.
 
 **Review criteria — our implementation choices, not scaffolding requirements:** The review logic lives in the supervisor agent's `EMAIL.md`. What follows is our current policy; every deployment will define its own criteria.
 - No more than 10 emails per 24 hours to any single recipient (rate limit)
-- Recipient must exist in the Google Contacts database before the email can be queued
+- Recipient must exist in the Google Contacts database (tpc26agent@gmail.com) — enforced at send time via name lookup
 - Appropriate language and tone (defined in writing guidelines, also in `EMAIL.md`)
 - Any rejection triggers an immediate Slack DM to the operator with reason and an override option
 
@@ -1073,7 +1069,7 @@ Students will:
 
 ---
 
-*Outline version: 2026-03-20 rev 12 — E4.3 smoke-test checklist added.*
+*Outline version: 2026-03-20 rev 14 — E5.1 updated: to_name/Google Contacts name-resolution pattern documented; EMAIL.md updated to match.*
 
 ---
 
