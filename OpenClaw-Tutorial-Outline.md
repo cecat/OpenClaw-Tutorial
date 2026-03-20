@@ -723,7 +723,7 @@ Key properties of well-designed agent scripts:
 **Example scripts from the worked example:**
 - `gmail_api.py` — search and fetch email via Gmail API; stdlib only
 - `contacts_api.py` — search and create contacts via Google People API; stdlib only
-- `notify.py` — compose and queue outbox email; calls LLM API directly for composition
+- `notify.py` — run the notification pipeline: call `sync-track-sheets.py`, compose emails, post Slack summary. **Script assembles all structural email content deterministically** (salutation, count line, submission list, URLs, closer, footer); LLM contributes one bounded optional sentence per email for warmth/context. Output is validated (length, no newlines, no URLs, no markdown); if rejected or LLM unavailable the sentence slot is blank and the email is still complete and correct. Calls LLM API directly; must run inside Docker where `nim:8000` is accessible via `run-notify.sh`. See Lesson 7.
 - `sync-track-sheets.py` — read master Google Sheet, route new submissions to per-track sheets; fully deterministic, no LLM
 
 **Dry-run mode as standard practice.** Any script that modifies external state (writes to Google Sheets, queues emails, posts to Slack) should support a `--dry-run` flag that exercises all reads but skips all writes. This is especially important for pipelines that run on a daily cron schedule — a bug introduced by a change to the script may not surface until the next scheduled run, potentially 24 hours later. A dry run lets you verify the full pipeline immediately after a change.
@@ -736,6 +736,30 @@ In our notify pipeline, `run-notify.sh --dry-run`:
 - Writes emails to outbox redirected to the system owner (configured in `config.yaml` under `notify: system_owner_email`) with `[DRY RUN]` subject prefix — the full outbox/send pipeline is exercised
 
 The test channel and system owner email live in `config.yaml` so they can be changed for a new deployment without touching the scripts themselves. `run-notify.sh` extracts these values at startup and passes them as environment variables into the Docker container.
+
+**`--test` for composition verification.** `--dry-run` exercises the full pipeline against real Google Sheets data. A complementary `--test` flag uses a built-in fake-submission fixture so the pipeline can be run at any time — even when there are no new real submissions — to verify LLM output format and email structure without touching Sheets, the outbox, or Slack. This is especially useful after prompt or template changes. Note: `--test` must be run via `run-notify.sh --test` (not `python3 notify.py --test` directly) because the LLM endpoint `nim:8000` is only accessible inside the Docker container network.
+
+**Smoke-test checklist after any notify.py change** (also useful for verifying a new deployment). Run from `~/code/spark-ai-agents` on spark-ts. Tests 1–2 have no external side effects and can be run freely. Tests 3–4 produce real external output (email to system owner, Slack post to `#openclaw-test`) but make no sheet writes and send no emails to real recipients.
+
+```bash
+# Test 1 - Verify email composition and LLM warm sentence using built-in fixture (no external calls)
+scripts/run-notify.sh --test
+```
+
+```bash
+# Test 2 - Verify Google Sheets connectivity and Slack post to #tpc-openclaw (no emails queued)
+scripts/run-notify.sh --no-email
+```
+
+```bash
+# Test 3 - Verify full pipeline end-to-end: real Sheets data, email to system owner, Slack to #openclaw-test (no sheet writes, no emails to real recipients)
+scripts/run-notify.sh --dry-run
+```
+
+```bash
+# Test 4 - Check logs for warnings or errors from the above runs
+tail -50 ~/code/spark-ai-agents/shared/logs/notify.log
+```
 
 ---
 
@@ -977,6 +1001,24 @@ The fix: set `sandbox.mode = "all"` in `openclaw.json` before connecting any ext
 
 ---
 
+**Lesson 7: Don't prompt-engineer LLMs not to break structure — invert control instead**
+
+The general principle: asking an LLM to compose an entire output (an email, a report, a Slack post) while instructing it via prompt *not* to corrupt specific elements (URLs, data fields, subject lines, signatures) is playing whack-a-mole. Each constraint you add is another thing the LLM can violate on any given run. The LLM has full control over the output — and LLMs do not reliably follow formatting constraints across many invocations.
+
+How it manifests:
+- Prompt says "use plain-text URLs only — do NOT use Markdown `[text](url)` formatting." A fraction of the time the LLM uses Markdown links anyway. Gmail doesn't render them. Recipients see `[Track sheet](https://...)` instead of the URL.
+- Prompt says "sign it {AGENT_NAME}." The LLM signs with `[Your Name]` because that's what it's seen in training examples of email templates.
+- Prompt says "include this list verbatim." The LLM rephrases it, reorders it, or drops entries that seem redundant to it.
+- Every time you fix one constraint failure, you introduce the risk of another — because you're fighting for control of something the LLM fully owns.
+
+The fix: invert control. The script assembles everything that must be correct — salutation, counts, data, URLs, closer, footer. The LLM gets one narrow, bounded task (e.g., "write one warm sentence") with output validation (length, no newlines, no URLs, no markdown). If the LLM fails or its output looks wrong, the slot is blank and the email is still complete and correct. The LLM cannot break URLs it was never asked to write.
+
+This is a specific application of the separation-of-responsibilities principle (§2.3), but it is worth stating separately because the failure mode is subtle: the output looks correct *most* of the time, making it easy to miss the pattern of occasional failures until recipients start noticing them.
+
+The pattern generalizes: wherever you find yourself writing prompt instructions that say "do not," consider whether the script should own that element entirely rather than instructing the LLM not to corrupt it.
+
+---
+
 ## What's Next: The Hands-On Lab
 
 The hands-on session (developed separately as its own document in this repository) uses the materials in this repo directly — no external clones required. The tutorial repo will be organized as:
@@ -1031,7 +1073,7 @@ Students will:
 
 ---
 
-*Outline version: 2026-03-19 rev 10 (revised structure).*
+*Outline version: 2026-03-20 rev 12 — E4.3 smoke-test checklist added.*
 
 ---
 
