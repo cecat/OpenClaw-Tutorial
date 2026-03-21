@@ -739,23 +739,37 @@ The test channel and system owner email live in `config.yaml` so they can be cha
 
 **`--test` for composition verification.** `--dry-run` exercises the full pipeline against real Google Sheets data. A complementary `--test` flag uses a built-in fake-submission fixture so the pipeline can be run at any time — even when there are no new real submissions — to verify LLM output format and email structure without touching Sheets, the outbox, or Slack. This is especially useful after prompt or template changes. Note: `--test` must be run via `run-notify.sh --test` (not `python3 notify.py --test` directly) because the LLM endpoint `nim:8000` is only accessible inside the Docker container network.
 
-**Smoke-test suite after any notify.py change** (also useful for verifying a new deployment). A single script runs all five tests and prints a clear PASS/FAIL summary — no need to read through log output. Run from `~/code/spark-ai-agents` on spark-ts:
+**Smoke-test suites** give you confidence that each agent's external integrations are working end-to-end without having to read logs or trigger a real run. Each agent has its own suite; each suite prints a clean `PASS/FAIL` summary. Run from `~/code/spark-ai-agents` on spark-ts.
+
+**Notify pipeline** (chattpc26 / tpc26agent@gmail.com):
 
 ```bash
-scripts/run-tests.sh
+scripts/run-chattpc26-tests.sh
 ```
-
-The five tests and what each covers:
 
 | Test | What it checks | External side effects |
 |------|---------------|----------------------|
 | Test 1 | Email composition and LLM warm sentence — uses built-in fixture, output to stdout | None |
-| Test 2 | Google Sheets connectivity and Slack post to `#tpc-openclaw` | Slack post to `#tpc-openclaw` |
-| Test 3 | Full pipeline dry-run: real Sheets, Slack to `#openclaw-test`, email to system owner if new submissions exist | Slack post to `#openclaw-test`; email to system owner if new items |
-| Test 4 | Log check — scans last 100 entries for ERROR/ABORT/FAIL lines | None |
-| Test 5 | Outbox → Gmail send pipeline — writes a dummy approved email to the outbox and confirms it reaches `sent/` | Email to system owner |
+| Test 2 | Google Sheets connectivity and Slack post to `#openclaw-test` (dry-run) | Slack post to `#openclaw-test` |
+| Test 3 | Log check — scans only log entries written during this run for ERROR/ABORT/FAIL | None |
+| Test 4 | Outbox → Gmail send pipeline — writes a dummy approved email to the outbox and confirms it reaches `sent/` | Email to system owner |
 
-Tests 3 and 5 make no sheet writes and send no emails to real recipients. The test suite exits with a one-line summary: `ALL TESTS PASSED` or `N TEST(S) FAILED` with per-test details for any failures.
+Test 2 uses `--dry-run` which routes Slack output to the designated test channel (never the live channel) and redirects any emails to the system owner. The log check captures the line count before tests start and only inspects new entries, so pre-existing errors from earlier runs don't cause false failures.
+
+**CeC-Admin agent** (cecat / cecatlett@gmail.com):
+
+```bash
+scripts/run-cecat-tests.sh
+```
+
+| Test | What it checks | External side effects |
+|------|---------------|----------------------|
+| Test 1 | Gmail read via `gmail_api.py` (gsuite-mcp token path used by host scripts) | None |
+| Test 2 | Gmail read via `gog` CLI (token:personal path used by the agent sandbox) | None |
+| Test 3 | Contacts read via `contacts_api.py` (gsuite-mcp token path) | None |
+| Test 4 | Contacts read via `gog` CLI (token:personal path) | None |
+
+Tests 1 and 2 exercise the two independent auth paths for Gmail — both must pass because host-side scripts use one and the agent sandbox uses the other. The same pattern applies to Tests 3 and 4 for Contacts. All four tests are read-only with no external side effects. The suite exits with a one-line summary: `ALL TESTS PASSED` or `N TEST(S) FAILED` with per-test detail for any failures.
 
 ---
 
@@ -889,7 +903,10 @@ channels:
 Any integration that requires authentication — Google, Slack, or other services — must make credentials available to the agent's sandbox container. OpenClaw's sandbox is ephemeral and filesystem-isolated; credentials do not appear automatically. The mechanism is explicit bind mounts in `openclaw.json` per agent:
 
 - **Read-only mounts** for credentials and scripts (e.g., OAuth `credentials.json`, Python scripts): the sandbox can read but not modify these.
-- **Read-write mounts** for token files (e.g., OAuth `token.json`): the sandbox must be able to write back refreshed tokens, or the OAuth session will expire on the next run.
+- **Read-only mounts** for token files managed by a CLI tool with encrypted storage (e.g., `gog`'s keyring directory): the host manages token refresh; the sandbox only reads. Mount as `:ro` — a sandbox that can write token files can silently overwrite or corrupt them.
+- **Read-write mounts** for token files that the sandbox itself must refresh (e.g., `gsuite-mcp`'s plain `token.json`): the sandbox calls the token refresh endpoint and writes the new access token back. If mounted `:ro`, the token will go stale within an hour and API calls will start failing with 401 errors.
+
+The key question when setting up a new credential mount: *who refreshes the token?* If the host script refreshes it, use `:ro`. If the sandbox refreshes it, use `:rw` — but audit carefully, since a writable credential mount is a higher-risk surface.
 
 This applies identically to Google OAuth tokens, Slack bot tokens stored on disk, or any other credential file. Each integration section below notes its specific mount requirements. *(See `Google-Integration.md` and `Slack-Integration.md` in this repository for full setup detail.)*
 
