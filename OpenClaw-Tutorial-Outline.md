@@ -1015,6 +1015,23 @@ The pattern generalizes: wherever you find yourself writing prompt instructions 
 
 ---
 
+**Lesson 8: Docker and host must not share mutable credential storage**
+
+When an agent script runs inside Docker and a companion script runs on the host, it is tempting to bind-mount the host's credential directory into the container as `:rw` so the container can refresh OAuth tokens and persist them. This creates silent, intermittent corruption.
+
+How it manifests: Docker's gog instance refreshes a Sheets OAuth token and writes back the full credential file — but only with the scopes Docker requested. The host's gmail and contacts entries are overwritten with nothing. Host scripts that call gog for gmail or contacts then fail with "No auth for X" — not because the token expired, but because Docker deleted it. The failure is non-deterministic (only happens after a Docker run that triggers a token refresh) and produces no obvious error at the time of deletion.
+
+The fix is architectural, not a mount flag: each runtime environment owns its credential store.
+
+- **Docker** has no access to the system keyring. It must use a file-based credential store, bind-mounted read-only (`:ro`) so it can read tokens but cannot write back.
+- **Host scripts** have full access to the system keyring. They should use it directly — not the file backend. Remove `GOG_KEYRING_BACKEND=file` from any host script that does not strictly need it.
+
+With this separation, Docker and host never share mutable state. A token refresh inside Docker cannot affect the host's credentials, and vice versa.
+
+The `:ro` mount is a belt-and-suspenders precaution once the credential stores are properly separated — but the root fix is the separation itself. See `GOG-Integration.md` for the specific bind-mount configuration.
+
+---
+
 ## What's Next: The Hands-On Lab
 
 The hands-on session (developed separately as its own document in this repository) uses the materials in this repo directly — no external clones required. The tutorial repo will be organized as:
