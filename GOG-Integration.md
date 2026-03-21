@@ -1,30 +1,15 @@
-# GOG Integration — Step-by-Step Setup Guide
+# GOG Integration — How It Works
 
-*Status: stub — to be completed as part of the hands-on lab development.*
-
-`gog` is a command-line tool for reading and writing Google Sheets, Docs, and
-Drive files. We use it for structured document operations where gsuite-mcp's
-Gmail-focused API is not the right fit. This guide covers installation,
-authentication, and agent sandbox configuration.
+`gog` is a command-line tool for accessing Google APIs (Gmail, Contacts, Drive,
+Sheets, Docs) from scripts and agent sandboxes. This guide explains the OAuth
+authentication model, how credentials and tokens are stored, and how access flows
+across the different execution contexts in a typical OpenClaw deployment.
 
 `gog` repository: [github.com/ditto-assistant/gog](https://github.com/ditto-assistant/gog)
 
 ---
 
-## Prerequisites
-
-- OpenClaw gateway running and accessible (Module 3 complete)
-- A Google account with access to the Sheets/Docs/Drive you need
-- Go installed on the host (required to build gog from source), or a pre-built
-  binary from the releases page
-- Google Cloud project with Drive and Sheets APIs enabled (see `Google-Integration.md`
-  Part 1 for project and API setup)
-
----
-
 ## Part 1 — Install gog
-
-*(Step-by-step to be written)*
 
 **Option A — from release binary:**
 ```bash
@@ -42,98 +27,345 @@ go build -o /usr/local/bin/gog .
 
 ---
 
-## Part 2 — Authentication
+## Part 2 — OAuth 2.0: What the URL-Pasting Is Actually Doing
 
-*(Step-by-step to be written)*
+OAuth exists so that a script or application can access a Google account **without
+ever handling the account's password.** Instead, the account owner grants the
+application a scoped, revocable token. Here is what happens during the initial
+setup flow:
 
-`gog` uses OAuth 2.0 similarly to gsuite-mcp but manages its own credential
-and token files.
+```
+Your script / gog CLI              Google                  You (in a browser)
+─────────────────────             ──────────               ──────────────────
+"I want to access Gmail.
+ Here is who I am:
+ client_id=..."             ──▶  "OK. Send the user
+                                  to this URL to
+                                  approve access."
+                            ◀──  returns authorization URL
 
-1. Obtain a `credentials.json` file for a Desktop app OAuth client from your
-   Google Cloud project (same project and credentials as gsuite-mcp if you are
-   using both; or a separate project if preferred)
-2. Run the authentication flow:
-   ```bash
-   gog auth login --credentials /path/to/credentials.json
-   ```
-   A browser window will open. Authorize access. `gog` writes a token file to
-   its config directory.
-3. Test the connection:
-   ```bash
-   gog sheets list    # lists accessible spreadsheets
-   ```
+                                                           open URL in browser
+                                                           log in to Google
+                                                           click Allow
+
+                            ◀──────────────────────────── Google redirects to
+                                                           http://127.0.0.1:PORT/
+                                                             ?code=4/0Ab...
+                                                           (page fails to load —
+                                                            this is expected)
+
+"I got the code from the
+ redirect URL. Here are
+ my client_id + code."      ──▶  "Code is valid.
+                                  Here are two tokens:
+                                  - access_token (1 hr)
+                                  - refresh_token (long-lived)"
+stores both tokens          ◀──
+```
+
+The redirect page "failing to load" is **not an error.** `gog` does not run a
+web server at `127.0.0.1`. Google redirects there because OAuth requires a redirect
+URI, and the loopback address is the standard choice for CLI tools. The
+`code=...` parameter in the redirect URL is all `gog` needs. You paste the full
+URL, `gog` extracts the code, exchanges it for tokens, and this flow never needs
+to happen again — unless you explicitly revoke the app's access.
+
+### Access tokens vs. refresh tokens
+
+| Token | Lifetime | Purpose |
+|-------|----------|---------|
+| Access token | ~1 hour | Authorizes individual API calls |
+| Refresh token | Until revoked* | Used to obtain new access tokens silently |
+
+`gog` manages this automatically: before each API call it checks whether the
+access token is still valid. If expired, it silently calls Google's token endpoint
+with the refresh token to get a new access token. You never need to repeat the
+URL-pasting flow unless the refresh token itself is revoked.
+
+**\* Testing mode vs. Published app:** If the OAuth app is left in Google Cloud
+Console "Testing" mode, refresh tokens expire after 7 days. Once the app is
+**Published** (even without going through Google's verification process, for apps
+that only access accounts you own), refresh tokens do not expire on a fixed schedule.
 
 ---
 
-## Part 3 — Sandbox Bind Mounts
+## Part 3 — The Three Files gog Needs
 
-As with gsuite-mcp, `gog`'s credentials and token files must be bind-mounted
-into the agent sandbox container. Add to `openclaw.json` under the relevant
-agent's `sandbox.docker.binds`:
+All `gog` configuration lives under `~/.config/gogcli/` on the host:
+
+```
+~/.config/gogcli/
+├── credentials.json          ← the app's identity (OAuth client)
+├── credentials-<name>.json   ← additional clients, one per Google Cloud project
+├── config.json               ← gog runtime settings
+├── .gog_pw                   ← password used to encrypt stored tokens
+└── keyring/
+    ├── token:default:<email>    ← stored OAuth tokens for one account
+    └── token:<name>:<email>     ← stored tokens for other client/account pairs
+```
+
+### credentials.json — the app's identity card
 
 ```json
-"binds": [
-  "/usr/local/bin/gog-real:/usr/local/bin/gog-real:ro",
-  "/usr/local/bin/gog-wrap:/usr/local/bin/gog:ro",
-  "/home/YOUR_USER/.config/gogcli:/tmp/.config/gogcli:ro",
-  "/home/YOUR_USER/.local/share/keyrings:/tmp/.local/share/keyrings:ro"
-]
+{
+  "client_id": "YOUR_CLIENT_ID.apps.googleusercontent.com",
+  "client_secret": "YOUR_CLIENT_SECRET"
+}
 ```
 
-- `gog` binary and wrapper: **read-only**
-- `gogcli` config directory: **read-only** — see credential isolation note below
-- `keyrings` directory: **read-only**
+This file identifies your *application* to Google — specifically an OAuth client
+you create in Google Cloud Console. It is **not** a user credential and cannot
+access anything on its own. Think of it as the app's username and password for
+talking to Google's authorization system, not for accessing Gmail or Sheets.
 
-**⚠️ HANDS-ON TODO:** Expand with full step-by-step bind mount setup, including
-the `gog-wrap` script content and how `GOG_KEYRING_BACKEND=file` is configured
-inside Docker vs. the system keyring used on the host.
+If you have multiple Google accounts that belong to different Google Cloud projects,
+create additional files named `credentials-<name>.json` and select between them
+using the `--client <name>` flag.
 
-**Critical — credential isolation (Lesson 8):** Mount the gogcli directory as
-`:ro`, never `:rw`. Docker only needs to *read* credentials. If mounted `:rw`,
-Docker's gog instance overwrites the host's credential file with only the scopes
-Docker requested, silently deleting the host's gmail and contacts auth entries.
-This failure is intermittent and produces no error at the time of deletion —
-it only surfaces the next time the host script tries to use the missing credentials.
+> **Important format note:** The Google Cloud Console "Download JSON" button
+> produces a wrapped format:
+> ```json
+> {"installed": {"client_id": "...", "client_secret": "...", ...}}
+> ```
+> `gog` expects the **unwrapped** format shown above. Extract just the
+> `client_id` and `client_secret` values into a new file.
 
-Host-side scripts (e.g., `send-approved-emails.sh`) should use the **system
-keyring** directly — do not set `GOG_KEYRING_BACKEND=file` in host scripts.
-Docker uses the file backend because it has no system keyring access; the host
-should not share Docker's credential store.
+### keyring/token:&lt;client&gt;:&lt;email&gt; — the actual credential
 
-Apply the change with `./apply-config.sh` and restart the gateway.
+This file is produced by running `gog auth add` and completing the OAuth flow. It
+contains an access token and a refresh token, **encrypted at rest** using the
+password in `.gog_pw`. The filename encodes which OAuth client and account it
+belongs to:
+
+| File name | Client used | Account |
+|-----------|-------------|---------|
+| `token:default:user@gmail.com` | `credentials.json` | `user@gmail.com` |
+| `token:personal:other@gmail.com` | `credentials-personal.json` | `other@gmail.com` |
+
+### config.json — gog runtime settings
+
+```json
+{
+  "keyring_backend": "file"
+}
+```
+
+`keyring_backend: file` tells gog to store and read tokens as encrypted files
+rather than using the OS system keyring (GNOME Keyring, macOS Keychain). This is
+required on a headless Linux server where no system keyring is available.
 
 ---
 
-## Part 4 — Using gog in Agent Scripts
+## Part 4 — The `--client` Flag and Why It Matters
 
-*(To be written)*
+When you add an account with a specific client:
 
-An example script that reads a Google Sheet and writes JSON output for the agent:
+```bash
+gog auth add user@gmail.com --client default --manual
+```
 
-```python
-# sync-track-sheets.py — reads a master Google Sheet, routes rows, writes JSON
-# Runs inside the sandbox; calls gog via subprocess
-import subprocess, json, sys
+`gog` writes **two** token files:
+- `token:default:user@gmail.com` — client-qualified (the correct one)
+- `token:user@gmail.com` — a clientless copy (legacy behavior)
 
-result = subprocess.run(
-    ['gog', 'sheets', 'read', '--id', SHEET_ID, '--range', 'Sheet1!A:Z'],
-    capture_output=True, text=True
-)
-data = json.loads(result.stdout)
-# ... process and write structured JSON output for the LLM to read
+When you later call `gog gmail send --account user@gmail.com` **without**
+`--client`, `gog` may resolve to the clientless token. On some systems this works;
+on others (particularly interactive terminals where the desktop session bus is
+present) it fails with an authentication error. The failure is environment-dependent
+and hard to diagnose.
+
+**Always specify `--client` on every gog call** — both during `auth add` and in
+every subsequent API call:
+
+```bash
+# Auth setup
+gog auth add user@gmail.com --client default \
+  --services gmail,contacts --manual
+
+# Every API call
+gog gmail send   --account user@gmail.com --client default ...
+gog contacts list --account user@gmail.com --client default --json
+```
+
+This ensures `gog` always reads the client-qualified token file, regardless of
+execution environment.
+
+---
+
+## Part 5 — Non-Interactive Execution (Cron and Scripts)
+
+On a desktop system, the OS keyring is unlocked at login and any program can read
+it silently. On a headless server running scripts via cron or Docker, there is no
+unlocked system keyring. Two environment variables must be set explicitly:
+
+```bash
+export GOG_KEYRING_BACKEND=file
+export GOG_KEYRING_PASSWORD=$(cat "$HOME/.config/gogcli/.gog_pw")
+```
+
+Without `GOG_KEYRING_BACKEND=file`, gog falls back to the system keyring, finds
+nothing, and reports "No auth." Without `GOG_KEYRING_PASSWORD`, it cannot decrypt
+the token files. These two lines should appear at the top of any script that
+calls gog outside of an interactive terminal session.
+
+---
+
+## Part 6 — How Credentials Flow Across Execution Contexts
+
+A typical OpenClaw deployment has three contexts that need Google API access:
+
+```
+Host machine
+├── ~/.config/gogcli/           ← master copy of all credentials and tokens
+│
+├── Host cron scripts           ← read directly from ~/.config/gogcli
+│   Set GOG_KEYRING_BACKEND=file + GOG_KEYRING_PASSWORD
+│   Use --client on every gog call
+│
+├── OpenClaw gateway (Docker)   ← bind mount of ~/.config/gogcli, read-only
+│   /host/path/.config/gogcli → /same/path/.config/gogcli:ro
+│   Container reads tokens; cannot modify them
+│
+└── Agent sandboxes (Docker)    ← same bind mount, inherited from gateway config
+    Read-only access to tokens
+    GOG_KEYRING_BACKEND=file set via wrapper script or environment
+```
+
+**There is one master copy of the tokens on the host.** Everything else reads it.
+
+### Why the mount must be `:ro`
+
+The gateway and sandbox containers should mount the `gogcli` directory as
+**read-only**. If mounted `:rw`, a container running `gog auth add` would
+overwrite the host's token files — potentially with tokens that only cover the
+scopes the container requested, silently discarding tokens for other scopes or
+accounts. This failure produces no error at the time it happens; it only surfaces
+the next time a host script tries to use the deleted token.
+
+---
+
+## Part 7 — Initial Setup Procedure
+
+### Step 1 — Create a Google Cloud project and OAuth client
+
+1. Go to [console.cloud.google.com](https://console.cloud.google.com) and create
+   a new project
+2. Enable the APIs you need (Gmail API, People API, Sheets API, etc.)
+3. Go to **APIs & Services → OAuth consent screen**
+   - User type: External
+   - Fill in app name and support email
+   - Add scopes for the APIs you enabled
+   - Add the target Google account as a test user
+   - Click **Publish App** (removes the 7-day refresh token expiry)
+4. Go to **APIs & Services → Credentials → Create Credentials → OAuth client ID**
+   - Application type: **Desktop app**
+   - Download the JSON, then create a new file with just `client_id` and
+     `client_secret` (see format note in Part 3)
+
+### Step 2 — Place credentials on the host
+
+```bash
+mkdir -p ~/.config/gogcli
+cat > ~/.config/gogcli/credentials.json << 'EOF'
+{
+  "client_id": "YOUR_CLIENT_ID.apps.googleusercontent.com",
+  "client_secret": "YOUR_CLIENT_SECRET"
+}
+EOF
+chmod 600 ~/.config/gogcli/credentials.json
+```
+
+### Step 3 — Set up the file keyring backend
+
+```bash
+# Choose a strong password
+echo "your-strong-password" > ~/.config/gogcli/.gog_pw
+chmod 600 ~/.config/gogcli/.gog_pw
+
+# Tell gog to use the file backend
+cat > ~/.config/gogcli/config.json << 'EOF'
+{
+  "keyring_backend": "file"
+}
+EOF
+```
+
+### Step 4 — Authenticate
+
+On a headless server, use `--manual` (single-process, no fragile state files):
+
+```bash
+export GOG_KEYRING_BACKEND=file
+export GOG_KEYRING_PASSWORD=$(cat ~/.config/gogcli/.gog_pw)
+
+gog auth add user@gmail.com --client default \
+  --services gmail,contacts \
+  --manual --force-consent
+```
+
+`gog` prints a Google authorization URL. Open it in any browser, log in as the
+target account, and click Allow. When the browser redirects to a page that fails
+to load, copy the full URL from the address bar and paste it into the terminal.
+
+### Step 5 — Verify
+
+```bash
+GOG_KEYRING_BACKEND=file \
+GOG_KEYRING_PASSWORD=$(cat ~/.config/gogcli/.gog_pw) \
+gog auth list
+```
+
+You should see the account listed with its authorized scopes.
+
+---
+
+## Part 8 — Re-authentication
+
+Re-authentication is only needed if:
+- You explicitly revoke the app's access in Google account settings
+- The token files are deleted from `~/.config/gogcli/keyring/`
+- You rotate to a new OAuth client
+
+It is **not** needed on a regular schedule once the app is published.
+
+The simplest approach for a headless server is a wrapper script that can be
+run from a remote machine:
+
+```bash
+#!/bin/bash
+# OAuth-renew.sh
+# Usage from a remote Mac: ssh -t your-server 'bash ~/path/to/OAuth-renew.sh'
+# The -t flag allocates a pseudo-terminal so the terminal can accept your paste.
+set -euo pipefail
+
+export GOG_KEYRING_BACKEND=file
+export GOG_KEYRING_PASSWORD="$(cat ~/.config/gogcli/.gog_pw)"
+
+echo "After the URL appears:"
+echo "  1. Open it in your browser and log in to the target account."
+echo "  2. When the page fails to load, copy the full URL and paste it here."
+echo ""
+
+gog auth add user@gmail.com --client default \
+  --services gmail,contacts \
+  --manual --force-consent
+
+echo ""
+GOG_KEYRING_BACKEND=file \
+GOG_KEYRING_PASSWORD="$(cat ~/.config/gogcli/.gog_pw)" \
+gog auth list
 ```
 
 ---
 
-## Part 5 — Verify the Integration
+## Part 9 — Troubleshooting
 
-*(Verification steps to be written)*
-
-1. Ask the agent to run the sync script
-2. Confirm it returns structured data from the Sheet
-3. Check the `gog` token modification timestamp to confirm refresh is working
-
----
-
-*This document will be expanded into a complete step-by-step guide with screenshots
-when the hands-on lab is developed.*
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| "No auth for gmail user@..." | `GOG_KEYRING_BACKEND` not set, or wrong token file resolved | Add `--client default`; set `GOG_KEYRING_BACKEND=file` |
+| "No auth" from interactive terminal but works over SSH | Desktop session bus present; gog picks up clientless token | Delete `keyring/token:user@gmail.com` (clientless); always use `--client` |
+| gog auth add uses the wrong client_id | `credentials.json` in wrapped Google Console format | Rewrite to flat `{"client_id": ..., "client_secret": ...}` format |
+| "manual auth state mismatch" | Stale state file from a previous partial auth attempt | Delete `~/.config/gogcli/oauth-manual-state-*.json` and retry |
+| Tokens expire after 7 days | OAuth app left in Testing mode | Publish the app in Google Cloud Console OAuth consent screen |
+| Host tokens overwritten after a container runs | `gogcli` directory mounted `:rw` in Docker | Change mount to `:ro` |
+| `gog auth add` succeeds but subsequent calls fail | Clientless token file created alongside the client-qualified one | Delete `keyring/token:user@gmail.com`; use `--client` on all calls |
