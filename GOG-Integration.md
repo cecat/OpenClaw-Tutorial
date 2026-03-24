@@ -319,6 +319,44 @@ You should see the account listed with its authorized scopes.
 
 ---
 
+## Part 10 — Gog Skill Auto-Mount Injection and Conflicts with Other Credentials
+
+If you install the gog skill into OpenClaw (from `~/.agents/skills/gog/SKILL.md`),
+the skill's `"requires": {"bins": ["gog"]}` declaration causes OpenClaw to
+automatically inject gog bind mounts into **every agent sandbox** — including
+agents that don't explicitly configure gog mounts in their own `openclaw.json` entry:
+
+```
+/tmp/.config/gogcli        ← gog config and keyring (host → container)
+/tmp/.local/share/keyrings ← GNOME keyring files
+gog binaries
+```
+
+**The conflict:** If you also configure directory-level bind mounts for another
+tool at paths like `/tmp/.config/gsuite-mcp` or `/tmp/.local/share/gsuite-mcp`,
+OpenClaw may override the child mounts when it resolves the parent-directory trees
+injected by the gog skill. The gsuite-mcp directories appear to be mounted but
+are empty or wrong.
+
+**The fix:** Use file-level bind mounts for other credential files, at paths
+outside the `/tmp/.config/` and `/tmp/.local/share/` trees:
+
+```json
+"/home/YOUR_USER/.local/share/gsuite-mcp/token.json:/tmp/gsuite-token.json:rw"
+"/home/YOUR_USER/.config/gsuite-mcp/credentials.json:/tmp/gsuite-credentials.json:ro"
+```
+
+And point scripts to them via environment variables:
+```json
+"GSUITE_MCP_TOKEN_PATH": "/tmp/gsuite-token.json",
+"GSUITE_MCP_CREDENTIALS_PATH": "/tmp/gsuite-credentials.json"
+```
+
+File-level mounts are completely independent of directory mounts — they cannot
+conflict with anything the gog skill injects.
+
+---
+
 ## Part 8 — Re-authentication
 
 Re-authentication is only needed if:
@@ -369,3 +407,5 @@ gog auth list
 | Tokens expire after 7 days | OAuth app left in Testing mode | Publish the app in Google Cloud Console OAuth consent screen |
 | Host tokens overwritten after a container runs | `gogcli` directory mounted `:rw` in Docker | Change mount to `:ro` |
 | `gog auth add` succeeds but subsequent calls fail | Clientless token file created alongside the client-qualified one | Delete `keyring/token:user@gmail.com`; use `--client` on all calls |
+| `aes.KeyUnwrap(): integrity check failed` on every call | Token file encrypted with a different password than current `.gog_pw` | Restore token file from backup; or re-run `gog auth add` after confirming `.gog_pw` is correct. Do NOT run `gog auth add --force-consent` to fix this — it will write a new file with the current password but only the scopes you request, silently discarding other scopes. |
+| "Access blocked: [App] has not completed Google verification" (403) | OAuth app uses sensitive scopes (gmail) and is not verified; common after running `gog auth add` against wrong Google Cloud project | Confirm you are in the correct project (check client_id in `gog auth list` vs your `credentials.json`). For personal-use apps, unpublish and re-add your account as a test user, then retry. |

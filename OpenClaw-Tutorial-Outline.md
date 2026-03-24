@@ -330,7 +330,17 @@ A **session** in OpenClaw is a conversation history file (`.jsonl`) stored in th
 
 **The latency dimension:** LLM generation runs sequentially at roughly 50–100 tps on a capable local GPU. Prefill — processing the entire input, including session history — runs in parallel and is much faster, typically 1–3 seconds for a typical context. But session history grows without a hard cap, while the system prompt is bounded at 150K characters. A long-running session eventually makes every interaction noticeably slower.
 
-**Our practice:** We reset sessions nightly via `reset-sessions.sh` (run at 3 AM via cron). The script archives any session file larger than 512 KB and truncates it to zero; the agent starts fresh from its Sacred Eight files on the next heartbeat. This also reinforces the scheduling architecture: the agent cannot rely on remembering what it did in a previous session — any state that must survive a reset must live in the Sacred Eight files, `PATHS.md`, `CALENDAR.md`, or the shared filesystem.
+**Our practice:** We reset sessions nightly via `reset-sessions.sh` (run at 2 AM via cron). The script archives any session file larger than 512 KB and truncates it to zero; the agent starts fresh from its Sacred Eight files on the next heartbeat. This also reinforces the scheduling architecture: the agent cannot rely on remembering what it did in a previous session — any state that must survive a reset must live in the Sacred Eight files, `PATHS.md`, `CALENDAR.md`, or the shared filesystem.
+
+**Active agents accumulate sessions faster than you expect.** OpenClaw's native `pruneHeartbeatTranscript` function clears session history only for heartbeat runs that produce no output — meaning empty or skipped runs. An active heartbeat agent, one that does real work on every heartbeat (reading email, posting to Slack, processing TODOs), will see its session grow continuously between nightly resets. If the nightly reset fails to run — for instance, because the script's execute bit was stripped — the session will keep growing and eventually overflow the model's context window. When this happens, the agent silently fails with a 5-minute timeout on every subsequent heartbeat. The nightly reset is therefore not a nice-to-have; it is the primary protection against context window overflow for active agents.
+
+**Execute permissions are critical.** All cron scripts must have the execute bit set (`chmod +x`). A script invoked by path without `bash` in the cron entry will silently fail every night if the execute bit is missing — no error is logged, and the failure may go unnoticed for days or weeks while sessions accumulate. Verify permissions after any git operation that might strip them:
+
+```bash
+ls -la scripts/*.sh   # all should show -rwxrwxr-x or similar
+```
+
+The infrastructure smoke test suite (`run-infrastructure-tests.sh`) includes an execute-permission check for all cron scripts.
 
 **Resetting after a behavioral change:** When you edit an agent's `.md` files and need the agent to adopt the new behavior immediately (not wait for the 3 AM nightly reset), use `reset-session.sh`:
 
@@ -345,7 +355,7 @@ The script archives all session files for the named agent, truncates them to zer
 ```bash
 # Session management scripts (run via cron on host — see §5.5 for full crontab)
 */5  * * * *  monitor-sessions.sh   # log .jsonl sizes; alert if growing large
-0    3 * * *  reset-sessions.sh     # archive >512KB sessions; truncate to zero
+0    2 * * *  reset-sessions.sh     # archive >512KB sessions; truncate to zero
 */30 * * * *  seed-sessions.sh      # restore missing heartbeat session files
 ```
 
@@ -653,24 +663,34 @@ All scheduling and session management runs on the host as cron jobs — never in
 ```
 TZ=America/Chicago
 
-# ── Scheduling engine (see §5.4) ─────────────────────────────────────────────
-*/5  * * * *  check-todos.sh           # promote due CALENDAR entries and past-due
-                                        # TODO entries to READY; zero LLM tokens
+# ── Scheduling engine ─────────────────────────────────────────────────────────
+*/5  * * * *  check-todos.sh               # promote due CALENDAR entries and past-due
+                                            # TODO entries to READY; zero LLM tokens
 
-# ── Outbox processing (see §7.2) ─────────────────────────────────────────────
-*/30 * * * *  send-approved-emails.sh  # send approved outbox drafts via Gmail API;
-                                        # move to sent/; archive rejected/
+# ── Outbox processing ─────────────────────────────────────────────────────────
+*/30 * * * *  send-approved-emails.sh      # send approved outbox drafts via Gmail API;
+                                            # move to sent/; archive rejected/
+*/5  * * * *  send-slack-posts.sh          # drain Slack post queue; post via
+                                            # chat.postMessage; archive to slack-sent/
 
-# ── Session management (see §5.5) ────────────────────────────────────────────
-*/5  * * * *  monitor-sessions.sh      # log session .jsonl sizes every 5 min;
-                                        # alert if approaching reset threshold
-0    3 * * *  reset-sessions.sh        # archive sessions >512KB, truncate to zero;
-                                        # agent restarts clean from Sacred Eight files
-*/30 * * * *  seed-sessions.sh         # restore missing heartbeat session files
-                                        # after gateway restarts
+# ── Scheduled pipeline runs ───────────────────────────────────────────────────
+0    4 * * 1,3,5  run-notify.sh            # Mon/Wed/Fri: sync sheets + Slack post +
+                                            # send submission emails to track leaders
+5    4 * * 0,2,4,6  run-notify.sh --no-email  # Sun/Tue/Thu/Sat: sync + Slack only
+0   23 * * 0    run-submission-ramp.sh     # Sunday 23:00: weekly submission ramp chart
+
+# ── Session management ────────────────────────────────────────────────────────
+*/5  * * * *  monitor-sessions.sh          # log session .jsonl sizes every 5 min;
+                                            # alert if approaching reset threshold
+0    2 * * *  reset-sessions.sh            # archive sessions >512KB, truncate to zero;
+                                            # agent restarts clean from Sacred Eight files
+*/30 * * * *  seed-sessions.sh             # restore missing heartbeat session files
+                                            # after gateway restarts
 ```
 
 Nothing in this crontab requires the LLM to be running. The scheduling engine, outbox sender, and session manager all operate independently of whether any agent is active.
+
+**Critical: all scripts invoked by path in crontab must have execute permission.** Cron does not use `bash` to invoke scripts listed by path — it calls them directly as executables. A script missing its execute bit (`-rw-r--r--` instead of `-rwxr-xr-x`) will silently fail every time without any error in the cron log. This is easy to lose: `git` does not always preserve execute bits across operations. The infrastructure smoke test suite verifies permissions on all cron scripts.
 
 ---
 
@@ -741,7 +761,7 @@ The test channel and system owner email live in `config.yaml` so they can be cha
 
 **Smoke-test suites** give you confidence that each agent's external integrations are working end-to-end without having to read logs or trigger a real run. Each agent has its own suite; each suite prints a clean `PASS/FAIL` summary. Run from `~/code/spark-ai-agents` on spark-ts.
 
-**Notify pipeline** (chattpc26 / tpc26agent@gmail.com):
+**Notify pipeline + submission ramp** (chattpc26 / tpc26agent@gmail.com):
 
 ```bash
 scripts/run-chattpc26-tests.sh
@@ -753,8 +773,15 @@ scripts/run-chattpc26-tests.sh
 | Test 2 | Google Sheets connectivity and Slack post to `#openclaw-test` (dry-run) | Slack post to `#openclaw-test` |
 | Test 3 | Log check — scans only log entries written during this run for ERROR/ABORT/FAIL | None |
 | Test 4 | Outbox → Gmail send pipeline — writes a dummy approved email to the outbox and confirms it reaches `sent/` | Email to system owner |
+| Test 5 | TPC26 master sheet readable via gog (in container) | None |
+| Test 6 | TPC25 master sheet readable via gog (in container) | None |
+| Test 7 | `openclaw-sandbox:graph` Docker image present | None |
+| Test 8 | `submission-ramp.py --dry-run` produces valid JSON with expected fields | None |
+| Test 9 | `--today` override produces correct day offset | None |
+| Test 10 | Full run writes PNG chart and JSON to `shared/reports/` | Local file write |
+| Test 11 | TPC26 total plausibility check (non-zero, compare to prior run) | None |
 
-Test 2 uses `--dry-run` which routes Slack output to the designated test channel (never the live channel) and redirects any emails to the system owner. The log check captures the line count before tests start and only inspects new entries, so pre-existing errors from earlier runs don't cause false failures.
+Tests 1–4 cover the notify pipeline. Tests 5–11 cover the submission ramp chart pipeline. Test 2 uses `--dry-run` which routes Slack output to the designated test channel (never the live channel) and redirects any emails to the system owner. The log check captures the line count before tests start and only inspects new entries, so pre-existing errors from earlier runs don't cause false failures.
 
 **CeC-Admin agent** (cecat / cecatlett@gmail.com):
 
@@ -764,12 +791,38 @@ scripts/run-cecat-tests.sh
 
 | Test | What it checks | External side effects |
 |------|---------------|----------------------|
-| Test 1 | Gmail read via `gmail_api.py` (gsuite-mcp token path used by host scripts) | None |
-| Test 2 | Gmail read via `gog` CLI (token:personal path used by the agent sandbox) | None |
-| Test 3 | Contacts read via `contacts_api.py` (gsuite-mcp token path) | None |
-| Test 4 | Contacts read via `gog` CLI (token:personal path) | None |
+| Test 1 | Gmail read via `gmail_api.py` (Google OAuth token, host script path) | None |
+| Test 2 | Gmail read via `gog` CLI (gog keyring, agent sandbox path) | None |
+| Test 3 | Contacts read via `contacts_api.py` (Google OAuth token) | None |
+| Test 4 | Contacts read via `gog` CLI (gog keyring) | None |
+| Test 5 | Calendar read via `gog` CLI (upcoming events, 7-day window) | None |
 
-Tests 1 and 2 exercise the two independent auth paths for Gmail — both must pass because host-side scripts use one and the agent sandbox uses the other. The same pattern applies to Tests 3 and 4 for Contacts. All four tests are read-only with no external side effects. The suite exits with a one-line summary: `ALL TESTS PASSED` or `N TEST(S) FAILED` with per-test detail for any failures.
+Tests 1 and 2 exercise the two independent auth paths for Gmail — both must pass because host-side scripts use the Google OAuth token directly while the agent sandbox uses the gog keyring. The same pattern applies to Tests 3 and 4 for Contacts. Test 5 exercises Calendar access. All five tests are read-only with no external side effects. The suite exits with a one-line summary: `ALL TESTS PASSED` or `N TEST(S) FAILED` with per-test detail for any failures.
+
+**Infrastructure**:
+
+```bash
+scripts/run-infrastructure-tests.sh
+```
+
+| Test | What it checks | Why it matters |
+|------|---------------|----------------|
+| Test 1 | Execute permissions on all cron scripts | A missing execute bit causes silent nightly failures — today's outage root cause |
+| Test 2 | All expected cron entries present in crontab | Detects missing or accidentally-deleted cron jobs |
+| Test 3 | `openclaw-gateway` container is running | Prerequisite for all agent operation |
+| Test 4 | Gateway container is healthy (not restarting) | Detects crash-loop and config problems |
+| Test 5 | No session files above 512 KB threshold | Early warning that a nightly reset failed or an agent is accumulating fast |
+| Test 6 | Heartbeat seed files (`main.jsonl`) present for all agents | Detects missing session files that cause silent heartbeat failures |
+| Test 7 | `check-todos.sh` runs without error | Scheduling engine health |
+| Test 8 | `monitor-sessions.sh` runs without error | Session monitoring health |
+| Test 9 | `seed-sessions.sh` runs without error (idempotent) | Session seed health |
+| Test 10 | Gog keyring files present for all agent accounts | Token files not missing or zero-byte |
+
+**Master suite** (runs all three suites and reports a combined summary):
+
+```bash
+scripts/run-all-tests.sh
+```
 
 ---
 
@@ -904,7 +957,7 @@ Any integration that requires authentication — Google, Slack, or other service
 
 - **Read-only mounts** for credentials and scripts (e.g., OAuth `credentials.json`, Python scripts): the sandbox can read but not modify these.
 - **Read-only mounts** for token files managed by a CLI tool with encrypted storage (e.g., `gog`'s keyring directory): the host manages token refresh; the sandbox only reads. Mount as `:ro` — a sandbox that can write token files can silently overwrite or corrupt them.
-- **Read-write mounts** for token files that the sandbox itself must refresh (e.g., `gsuite-mcp`'s plain `token.json`): the sandbox calls the token refresh endpoint and writes the new access token back. If mounted `:ro`, the token will go stale within an hour and API calls will start failing with 401 errors.
+- **Read-write mounts** for token files that the sandbox itself must refresh (e.g., the Google OAuth `token.json` used by `gmail_api.py`): the script calls the token refresh endpoint and writes the new access token back. If mounted `:ro`, the token will go stale within an hour and API calls will start failing with 401 errors.
 
 The key question when setting up a new credential mount: *who refreshes the token?* If the host script refreshes it, use `:ro`. If the sandbox refreshes it, use `:rw` — but audit carefully, since a writable credential mount is a higher-risk surface.
 
@@ -912,21 +965,23 @@ This applies identically to Google OAuth tokens, Slack bot tokens stored on disk
 
 ### I.3 Google — Two Integration Paths
 
-We use two different tools to reach Google services, for specific reasons:
+We use two different approaches to reach Google services:
 
-| Tool | Repository | Best for | Why |
-|---|---|---|---|
-| `gsuite-mcp` | [github.com/MarkusPfundstein/mcp-gsuite](https://github.com/MarkusPfundstein/mcp-gsuite) | Gmail, Google Contacts | OAuth browser flow; writes `token.json`; works well with Gmail `messages.list` API |
-| `gog` CLI | [github.com/ditto-assistant/gog](https://github.com/ditto-assistant/gog) | Google Sheets, Docs, Drive | Better for bulk read/write on structured documents |
+| Approach | Best for | Runtime mechanism |
+|---|---|---|
+| Direct Google OAuth token + Python scripts | Gmail, Google Contacts | `gmail_api.py`, `contacts_api.py` call Google APIs directly via Python `urllib`; no third-party runtime dependency |
+| `gog` CLI | Google Sheets, Docs, Drive, Gmail sending | CLI tool with encrypted file keyring; works well for bulk reads and outbound sends |
 
-**Why two tools?** `gog` uses `threads.list` for Gmail, which returns only the first message of a thread and ignores `in:sent` filters — unsuitable for inbox and sent-mail workflows. `gsuite-mcp` handles OAuth and token refresh cleanly; our scripts (`gmail_api.py`, `contacts_api.py`) read the token it writes and call the Gmail API directly via Python `urllib` (no third-party pip dependencies in the sandbox). For Drive and Sheets, `gog` is more capable. If your use case doesn't require Gmail inbox access, `gog` alone may suffice.
+**Why two approaches?** `gog` uses Google's `threads.list` API for Gmail, which returns only the first message of a thread and ignores `in:sent` filters — unsuitable for inbox triage workflows. Our `gmail_api.py` calls `messages.list` directly, which handles inbox queries correctly. For Sheets, Drive, and outbound email sends, `gog` is the right tool. If your use case doesn't require Gmail inbox reading, `gog` alone may suffice.
+
+**A note on path names:** The Google OAuth `token.json` and `credentials.json` files live in directories named `~/.local/share/gsuite-mcp/` and `~/.config/gsuite-mcp/`. These names are a legacy artifact — the files are standard Google OAuth credentials with no runtime dependency on gsuite-mcp. See `Google-Integration.md` for the full explanation and setup instructions.
 
 **Google Cloud setup** (done once before the lab — full steps in `Google-Integration.md`):
 - Create a Google Cloud project and enable the APIs you need: Gmail, People, Drive, Sheets as applicable
 - Configure the OAuth consent screen (internal or external depending on your Google Workspace plan)
 - Download `credentials.json` from the API credentials page
-- Run `gsuite-mcp auth login` (browser-based OAuth flow, one time) to generate `token.json`
-- Bind-mount both files into the agent sandbox per §8.2 above
+- Run the one-time OAuth browser flow to generate `token.json` (any standard Google OAuth desktop flow tool works)
+- Bind-mount both files into the agent sandbox per the instructions in `Google-Integration.md`
 
 ---
 
@@ -1046,6 +1101,22 @@ The fix is architectural, not a mount flag: each runtime environment owns its cr
 With this separation, Docker and host never share mutable state. A token refresh inside Docker cannot affect the host's credentials, and vice versa.
 
 The `:ro` mount is a belt-and-suspenders precaution once the credential stores are properly separated — but the root fix is the separation itself. See `GOG-Integration.md` for the specific bind-mount configuration.
+
+---
+
+**Lesson 9: Google OAuth and gog token management is surprisingly fragile — plan accordingly**
+
+Google OAuth integration has more sharp edges than it appears. Several of these combine badly in an agent deployment:
+
+**OAuth app mode matters more than expected.** Apps left in Google Cloud Console "Testing" mode issue refresh tokens that expire after 7 days — regardless of how long your access token lasts. For a cron job this means re-authenticating weekly. Publish the app (OAuth consent screen → Publish App) *before* deploying to production. Gmail and Contacts are sensitive scopes; Google will show an "unverified app" warning during the one-time auth flow, which you click through. Formal verification is only needed if users outside your own accounts need to authorize the app.
+
+**"CeC-Admin-Agent has not completed the Google verification process"** is a 403 that blocks all re-authorization. If you see this, verify you are working in the correct Google Cloud project — the app *name* in the OAuth consent screen may not match the project *name* in the console, causing confusion when you go looking. Confirm you are in the right project by checking the client_id in `gog auth list` against the credentials.json you placed on disk.
+
+**Token files are encrypted with the password in `.gog_pw`.** Running `gog auth add --force-consent` when the token file was previously encrypted with a different password produces `aes.KeyUnwrap(): integrity check failed` on every subsequent gog call — the file now has two layers of conflicting encryption. The fix is to restore the token from a backup or re-run `gog auth add` cleanly after confirming `.gog_pw` contains the correct password.
+
+**Two credential mount paths — two problems.** In a sandbox that uses both `gog` (for Sheets) and `gsuite-mcp` (for Gmail/Contacts), the gog OpenClaw skill automatically injects directory-level bind mounts at `/tmp/.config/gogcli` and `/tmp/.local/share/keyrings`. If you also configure directory-level mounts for gsuite-mcp's token and credentials at `/tmp/.config/gsuite-mcp` and `/tmp/.local/share/gsuite-mcp`, OpenClaw may resolve the parent directory mounts in ways that override the child ones. Use **file-level bind mounts** at neutral paths instead — mount the individual token and credentials files at `/tmp/gsuite-token.json` and `/tmp/gsuite-credentials.json`, and point the scripts there via `GSUITE_MCP_TOKEN_PATH` and `GSUITE_MCP_CREDENTIALS_PATH` environment variables. File-level mounts cannot conflict with gog's directory mounts.
+
+**Never run `gog auth add` inside a container with `:rw` credential mounts.** A container running `gog auth add` writes back token files with only the scopes *it* requested — silently overwriting any other scopes or accounts that were in the host's keyring. The host's next gog call for those scopes fails with "No auth for X" without any error at write time. Mount `gogcli` as `:ro` in all agent sandbox containers. If a token needs refreshing, do it on the host.
 
 ---
 
