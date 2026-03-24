@@ -357,6 +357,84 @@ conflict with anything the gog skill injects.
 
 ---
 
+## Part 11 — Sharing Files with Users via Google Drive
+
+Google Drive is the right place for ad-hoc agent output — analysis results, generated reports, data exports — that an agent wants to hand off to a user. It keeps that output out of `/shared/outbox/` (a JSON-only pipeline, not a file drop) and off the email queue (which requires human approval per the outbox pattern).
+
+### Folder ownership and access controls
+
+Create the shared folder using the **agent's Google account** (e.g., `tpc26agent@gmail.com`). Because the agent *owns* the folder, it can write to it using its existing gog credentials — no separate write-access grant is needed.
+
+To allow end users to open files without signing in, set the folder sharing to **"Anyone with the link → Viewer"**.
+
+> **Two independent controls:** Folder ownership grants the agent write access. "Anyone with the link can view" grants end-user read access. These are separate settings — configuring end-user read access does not affect the agent's write access, and vice versa.
+
+To find the folder ID, open the folder in your browser. The ID is the last segment of the URL:
+
+```
+https://drive.google.com/drive/folders/1nd7VETj6csfjYjLktv1oelsnGyID8UaV
+                                        └──────── folder ID ───────────────┘
+```
+
+### Upload command
+
+From inside the agent sandbox (or any context where gog credentials are available):
+
+```bash
+gog drive upload /tmp/output_file.md \
+  --parent FOLDER_ID \
+  --account tpc26agent@gmail.com \
+  --client default \
+  --json
+```
+
+**Always specify `--client default`** — see Part 4. Without it, gog may resolve to a clientless token that fails in the sandbox execution environment.
+
+The `--json` flag returns a JSON object. The relevant fields:
+
+| Field | Content |
+|-------|---------|
+| `id` | Drive file ID |
+| `webViewLink` | URL to share with the user |
+| `name` | File name as stored in Drive |
+
+### The `--convert` flag
+
+```bash
+gog drive upload /tmp/report.md \
+  --parent FOLDER_ID \
+  --account tpc26agent@gmail.com \
+  --client default \
+  --convert --json
+```
+
+Without `--convert`: the file is stored as a raw attachment (e.g., a `.md` file that the browser downloads).
+
+With `--convert`: Drive converts the file to a native Google Doc — rendered in the browser, full-text searchable, editable. For reports and summaries the user will read directly, `--convert` is generally preferred. Note that conversion changes the MIME type; the `webViewLink` still works correctly.
+
+### After upload
+
+Standard pattern for an agent completing a Drive upload:
+
+1. Parse `webViewLink` from the JSON response
+2. Share the link with the user in the current channel (Slack DM, chat message, etc.)
+3. Clean up the local temp file: `rm -f /tmp/output_file.md`
+
+Files uploaded to Drive are persistent — they are not automatically deleted. If the folder accumulates many files over time, a maintenance script can list and prune old files using `gog drive list --parent FOLDER_ID --account tpc26agent@gmail.com --json`.
+
+### Where not to use Drive
+
+| Output type | Correct destination |
+|-------------|---------------------|
+| Ad-hoc user-facing reports, exports, analysis | Drive folder (this section) |
+| Queued email or Slack drafts awaiting approval | `/shared/outbox/` (JSON only) |
+| Intermediate files within a single runbook | `/tmp/` — clean up when done |
+| Internal reports consumed by other scripts | `shared/reports/` |
+
+Never write `.md`, `.txt`, or other non-JSON files to `/shared/outbox/`. That directory is a JSON pipeline processed by cron — non-JSON files are silently ignored and accumulate as clutter.
+
+---
+
 ## Part 8 — Re-authentication
 
 Re-authentication is only needed if:

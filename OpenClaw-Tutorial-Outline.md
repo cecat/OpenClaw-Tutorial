@@ -656,6 +656,33 @@ OpenClaw heartbeat  (every 15 min, tokens only when READY lines exist)
 
 `check-todos.sh` needs to know whether a given `CALENDAR.md` entry has already fired today — otherwise it would re-promote recurring items on every 5-minute run. It solves this with a small JSON file on the host: `shared/todos/calendar-state.json`. Each time a recurring entry fires, the script records the entry's key and the current timestamp in this file. On subsequent runs it checks the file before promoting — if the entry already fired within its scheduling window (e.g., today for a DAILY entry, or this week for a MON entry), it is skipped. Because this state lives on the host filesystem rather than in the agent's memory, it survives session resets. An agent that loses its session history at 3 AM will still not re-fire its Monday report on Tuesday, because `calendar-state.json` knows it already ran.
 
+**⚠️ Registration required when adding a new agent**
+
+`check-todos.sh` contains two hard-coded arrays that must be updated every time a new agent is added to the system:
+
+```bash
+TODO_FILES=(
+    "$BASE_DIR/main/TODO.md"
+    "$BASE_DIR/chattpc26/TODO.md"
+    "$BASE_DIR/new-agent/TODO.md"      # ← add this line
+)
+
+CALENDAR_PAIRS=(
+    "$BASE_DIR/main/CALENDAR.md:$BASE_DIR/main/TODO.md:main"
+    "$BASE_DIR/chattpc26/CALENDAR.md:$BASE_DIR/chattpc26/TODO.md:chattpc26"
+    "$BASE_DIR/new-agent/CALENDAR.md:$BASE_DIR/new-agent/TODO.md:new-agent"  # ← add this line
+)
+```
+
+If you omit these entries, the new agent's `TODO.md` is never scanned for past-due items and its `CALENDAR.md` entries are never promoted to `READY`. All calendar-driven tasks for that agent silently never fire — no error, no warning. This is the kind of failure that only surfaces when you notice a scheduled task hasn't run in days.
+
+**Agent registration checklist — do all four when adding a new agent:**
+
+1. Create the agent workspace with Sacred Eight files and `TODO.md`
+2. Add the agent to `openclaw.json` (via `config.yaml` + `apply-config.sh`)
+3. Add the agent's Slack channel binding in `config.yaml`
+4. **Add the agent to both `TODO_FILES` and `CALENDAR_PAIRS` in `check-todos.sh`**
+
 ### E3.5 The Host-Side Crontab
 
 All scheduling and session management runs on the host as cron jobs — never inside any container. Crontab supports comment lines, so the entries are grouped by purpose:
@@ -684,13 +711,54 @@ TZ=America/Chicago
                                             # alert if approaching reset threshold
 0    2 * * *  reset-sessions.sh            # archive sessions >512KB, truncate to zero;
                                             # agent restarts clean from Sacred Eight files
-*/30 * * * *  seed-sessions.sh             # restore missing heartbeat session files
-                                            # after gateway restarts
+0   14 * * *  reset-sessions.sh            # afternoon reset — same operation; reduces max
+                                            # session age from 24h to ~12h
+*/30 * * * *  seed-sessions.sh             # restore missing heartbeat session files after
+                                            # gateway restarts; also detects stalled heartbeat
+                                            # sessions (no new lines in two consecutive 30-min
+                                            # checks) and resets them automatically
 ```
 
 Nothing in this crontab requires the LLM to be running. The scheduling engine, outbox sender, and session manager all operate independently of whether any agent is active.
 
 **Critical: all scripts invoked by path in crontab must have execute permission.** Cron does not use `bash` to invoke scripts listed by path — it calls them directly as executables. A script missing its execute bit (`-rw-r--r--` instead of `-rwxr-xr-x`) will silently fail every time without any error in the cron log. This is easy to lose: `git` does not always preserve execute bits across operations. The infrastructure smoke test suite verifies permissions on all cron scripts.
+
+---
+
+### E3.6 Resilience: Retrying Calendar-Driven Tasks on Failure
+
+**Heartbeat tasks vs. calendar tasks — different retry calculus**
+
+Tasks that run every 15 minutes are self-recovering by nature: if a heartbeat fails, the next one fires 15 minutes later. Calendar-driven tasks are different. A task that runs once a day or once a week may not have another opportunity for hours or days. A single transient failure — network unreachable, API timeout, container DNS hiccup — permanently loses that execution unless the system can recover.
+
+**The `_ON_FAILURE.md` shared handler**
+
+The fix is a shared failure handler: `runbooks/_ON_FAILURE.md`. Rather than duplicating recovery logic in every runbook, each calendar-driven runbook delegates to this file on any exec failure. The handler implements a retry chain built entirely on the `TODO.md` / `HEARTBEAT.md` infrastructure already in place:
+
+1. **First failure:** write a new `READY | <timestamp> | [retry 1/2] <task>` entry to `TODO.md` and send a brief Slack alert.
+2. **Second failure:** write `[retry 2/2]`, send another alert.
+3. **Third failure (exhausted):** send a final Slack escalation and stop — do not retry.
+
+The handler reads the `[retry N/2]` marker from its own task description to know which attempt it is on. No external state file is needed.
+
+**The `[retry N/2]` embedded counter**
+
+The retry count travels inside the TODO entry text itself — `[retry 1/2]`, `[retry 2/2]`. This makes the retry state visible in `TODO.md` and `todos.log`, survives session resets, and requires no additional infrastructure. A natural-language task description like `Follow runbooks/RUNBOOK_EMAIL_DIGEST.md` becomes `[retry 1/2] Follow runbooks/RUNBOOK_EMAIL_DIGEST.md` on first retry.
+
+**Wiring a runbook to the handler**
+
+Add two lines after the header block of every calendar-driven runbook:
+
+```markdown
+**On any exec failure:** follow `/workspace/runbooks/_ON_FAILURE.md`.
+**Retry target:** `/workspace/runbooks/RUNBOOK_X.md`
+```
+
+The first line is the trigger instruction — the agent calls `_ON_FAILURE.md` whenever any `exec:` step fails. The second tells `_ON_FAILURE.md` which runbook to re-queue for the next attempt.
+
+**When not to use this pattern**
+
+Do not add `_ON_FAILURE.md` references to runbooks triggered every 15 minutes. For always-on heartbeat tasks, the natural recurrence is the retry mechanism. The overhead of the retry chain — Slack alerts, TODO entries — is only appropriate for tasks that have a meaningful window between scheduled runs.
 
 ---
 
@@ -715,10 +783,11 @@ The LLM never decides when to act. Cron never decides what to say. Scripts never
 
 A runbook is a markdown file in the agent's `runbooks/` directory. It gives step-by-step instructions for a specific recurring task and is read **fresh from disk on every trigger** — not held in session memory. This makes runbooks the most reliable vehicle for procedural changes: edit the runbook, and the very next trigger follows the new procedure exactly.
 
-**The three-file pattern for any new recurring duty:**
+**The four-file pattern for a resilient recurring duty:**
 1. One line in `IDENTITY.md` — what the duty is and its trigger
-2. One runbook file `runbooks/RUNBOOK_X.md` — how to execute it step by step
+2. One runbook file `runbooks/RUNBOOK_X.md` — how to execute it step by step; add the two-line `_ON_FAILURE.md` reference block after the header
 3. One line in `CALENDAR.md` — when to trigger it (read by bash, not the LLM)
+4. `runbooks/_ON_FAILURE.md` — shared failure handler; created once per agent, reused by all calendar-driven runbooks *(see E3.6)*
 
 **Example: RUNBOOK_EMAIL_DIGEST.md**
 - Triggered: daily at 08:00 AM Central (via CALENDAR.md → check-todos.sh → HEARTBEAT.md)
@@ -816,7 +885,8 @@ scripts/run-infrastructure-tests.sh
 | Test 7 | `check-todos.sh` runs without error | Scheduling engine health |
 | Test 8 | `monitor-sessions.sh` runs without error | Session monitoring health |
 | Test 9 | `seed-sessions.sh` runs without error (idempotent) | Session seed health |
-| Test 10 | Gog keyring files present for all agent accounts | Token files not missing or zero-byte |
+| Test 10 | All agents in openclaw.json registered in check-todos.sh TODO_FILES and CALENDAR_PAIRS | Catches silent registration gap — no error is raised, but calendar tasks never fire |
+| Test 11 | Gog keyring files present for all agent accounts | Token files not missing or zero-byte |
 
 **Master suite** (runs all three suites and reports a combined summary):
 
@@ -983,6 +1053,27 @@ We use two different approaches to reach Google services:
 - Run the one-time OAuth browser flow to generate `token.json` (any standard Google OAuth desktop flow tool works)
 - Bind-mount both files into the agent sandbox per the instructions in `Google-Integration.md`
 
+**Sharing agent output with users via Google Drive**
+
+For ad-hoc output — analysis results, generated reports, data exports — agents can upload files to a shared Google Drive folder and give users the link. This keeps ad-hoc output out of `/shared/outbox/` (a JSON-only message queue) and away from the email/Slack pipelines (which require approval).
+
+Create the shared folder using the **agent's Google account** (e.g., `tpc26agent@gmail.com`). Because the agent *owns* the folder, no separate write-access grant is needed — account ownership is the write credential. Set the folder sharing to **"Anyone with the link → Viewer"** so recipients can open files without signing in.
+
+> **Two independent access controls:** "Anyone with the link can view" grants end-user read access. The agent's write access comes from folder ownership, not from the public link setting.
+
+Upload from inside the agent sandbox:
+
+```bash
+gog drive upload /tmp/report.md \
+  --parent <FOLDER_ID> \
+  --account tpc26agent@gmail.com \
+  --client default --json
+```
+
+`--json` returns structured output including `webViewLink` (the URL to share). `--convert` uploads as a Google Doc rather than a raw attachment — preferred for reports the user will read in the browser. After uploading, the agent shares the link in the current channel and cleans up `/tmp/`.
+
+Full setup procedure and command reference: `GOG-Integration.md`.
+
 ---
 
 
@@ -1117,6 +1208,21 @@ Google OAuth integration has more sharp edges than it appears. Several of these 
 **Two credential mount paths — two problems.** In a sandbox that uses both `gog` (for Sheets) and `gsuite-mcp` (for Gmail/Contacts), the gog OpenClaw skill automatically injects directory-level bind mounts at `/tmp/.config/gogcli` and `/tmp/.local/share/keyrings`. If you also configure directory-level mounts for gsuite-mcp's token and credentials at `/tmp/.config/gsuite-mcp` and `/tmp/.local/share/gsuite-mcp`, OpenClaw may resolve the parent directory mounts in ways that override the child ones. Use **file-level bind mounts** at neutral paths instead — mount the individual token and credentials files at `/tmp/gsuite-token.json` and `/tmp/gsuite-credentials.json`, and point the scripts there via `GSUITE_MCP_TOKEN_PATH` and `GSUITE_MCP_CREDENTIALS_PATH` environment variables. File-level mounts cannot conflict with gog's directory mounts.
 
 **Never run `gog auth add` inside a container with `:rw` credential mounts.** A container running `gog auth add` writes back token files with only the scopes *it* requested — silently overwriting any other scopes or accounts that were in the host's keyring. The host's next gog call for those scopes fails with "No auth for X" without any error at write time. Mount `gogcli` as `:ro` in all agent sandbox containers. If a token needs refreshing, do it on the host.
+
+---
+
+**Lesson 10: A heartbeat that ends without HEARTBEAT_OK silences the agent until the next session reset**
+
+The general principle: OpenClaw schedules the next heartbeat trigger at the end of a clean session close — the one that includes `HEARTBEAT_OK`. If a heartbeat session ends for any other reason (LLM stops mid-run, returns an error response, or explicitly says "stopping" without sending `HEARTBEAT_OK`), OpenClaw has no signal to schedule the next trigger. The agent goes quiet. No alert fires. From the outside, nothing looks wrong until you notice the agent hasn't posted in hours.
+
+How it manifests:
+- A heartbeat encounters a network error on Step 2. The error handler correctly writes a Slack alert — but then says "Stopping heartbeat execution." The session ends without `HEARTBEAT_OK`. That run is the last one. The next trigger is never scheduled.
+- `monitor-sessions.sh` shows the session file stopped growing. `grep` for READY entries in TODO.md finds items written hours ago that were never executed. The agent is completely healthy from a container standpoint — it just hasn't run since the failure.
+- The stall is silent because there is no "missed heartbeat" counter anywhere in OpenClaw's standard configuration. You only discover it by noticing the absence of expected activity.
+
+The fix: every error handler in HEARTBEAT.md must end with `HEARTBEAT_OK`, not with a stop or return. The correct pattern is: write the Slack alert, *then* respond `HEARTBEAT_OK`. The heartbeat ran; it encountered a problem it has reported; it should be scheduled to run again in 15 minutes. Stopping without `HEARTBEAT_OK` is the wrong mental model — it treats the heartbeat like a transaction that must succeed fully or not at all. Heartbeats are not transactions. They are periodic health checks, and a check that ran and reported a problem is a successful check.
+
+The stall watchdog in `seed-sessions.sh` provides an automatic safety net: if a heartbeat session accumulates no new lines in two consecutive 30-minute checks, the script truncates and reseeds the session file, forcing a clean restart. This catches stalls regardless of cause — including bugs not yet identified. It does not replace the `HEARTBEAT_OK` fix; it is a backstop for cases where the fix was not applied or where a new failure mode is encountered.
 
 ---
 
