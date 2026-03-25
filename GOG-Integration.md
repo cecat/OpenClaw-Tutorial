@@ -487,6 +487,56 @@ GOG_KEYRING_PASSWORD="$(cat ~/.config/gogcli/.gog_pw)" \
 gog auth list
 ```
 
+### Re-authenticating the gmail_api.py token (separate from gog)
+
+If your agent uses a Python script (`gmail_api.py`, `contacts_api.py`) that reads
+its own token file at `~/.local/share/gsuite-mcp/token.json`, this is entirely
+separate from gog's keyring. Symptoms of a revoked token here are HTTP 400 errors
+from the agent's heartbeat, while gog-based tests (e.g., `gog gmail list`) still pass.
+
+Do **not** use `gsuite-mcp setup` for re-auth — that binary is only needed for the
+initial setup. A standalone script handles all future re-authorizations with no
+external tools beyond Python stdlib:
+
+```bash
+python3 scripts/reauth-cecat.py
+```
+
+The script reads `~/.config/gsuite-mcp/credentials.json`, prints an authorization
+URL, and waits for you to paste the redirect URL (your browser will show
+`ERR_CONNECTION_REFUSED` — that is expected; the auth code is in the URL).
+It writes a fresh `token.json` including the `expiry` field required by `gmail_api.py`.
+
+After re-auth, verify with the agent's smoke test:
+
+```bash
+bash scripts/run-cecat-tests.sh
+```
+
+### Preventing 7-day token expiration: publish your OAuth app
+
+Google refresh tokens issued to apps in **Testing** mode expire after 7 days,
+regardless of usage. This causes silent recurring failures that look like
+intermittent network errors.
+
+**Fix — do this once per Google Cloud project:**
+
+1. Go to [console.cloud.google.com](https://console.cloud.google.com)
+2. Select the project (e.g., `cec-personal` for the cecat account)
+3. **APIs & Services → OAuth consent screen**
+4. Click **Publish App**
+5. Acknowledge the verification warning (personal-use apps do not need Google
+   verification; you will see an "unverified app" warning when authorizing but
+   it is harmless for apps you control)
+
+Once published, refresh tokens persist until explicitly revoked. You will only
+need to re-authorize if the account password changes, you revoke access manually,
+or Google detects a security event on the account.
+
+If you have multiple Google Cloud projects (one per agent account), check and
+publish each one. A project that was already used in production (not just
+testing) may already be published.
+
 ---
 
 ## Part 9 — Troubleshooting
