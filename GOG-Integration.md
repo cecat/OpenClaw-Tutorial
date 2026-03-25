@@ -441,8 +441,23 @@ Re-authentication is only needed if:
 - You explicitly revoke the app's access in Google account settings
 - The token files are deleted from `~/.config/gogcli/keyring/`
 - You rotate to a new OAuth client
+- **Google revokes the refresh token** — this happens silently and without warning due to security events, password changes, too many concurrent sessions, or extended inactivity. The first symptom is HTTP 400 on every API call; see Part 9.
 
 It is **not** needed on a regular schedule once the app is published.
+
+**If the token file may be corrupted** (e.g., you previously ran `gog login` with the wrong keyring passphrase, leaving a file that is larger than expected — ~4KB vs the normal ~1.8KB for other accounts), delete it before re-authenticating:
+
+```bash
+# Check sizes — a healthy token file is ~1800 bytes
+ls -la ~/.config/gogcli/keyring/
+
+# Delete only the affected account's token
+rm ~/.config/gogcli/keyring/token:personal:user@gmail.com
+# or for the default client:
+rm ~/.config/gogcli/keyring/token:default:user@gmail.com
+```
+
+The keyring passphrase is stored in `~/.config/gogcli/.gog_pw`. Scripts read it automatically via `$(cat ~/.config/gogcli/.gog_pw)`; interactive `gog login` prompts for it. Use whatever is in that file — do not guess or use a different password, as entering the wrong passphrase will create a new corrupted token file.
 
 The simplest approach for a headless server is a wrapper script that can be
 run from a remote machine:
@@ -486,4 +501,5 @@ gog auth list
 | Host tokens overwritten after a container runs | `gogcli` directory mounted `:rw` in Docker | Change mount to `:ro` |
 | `gog auth add` succeeds but subsequent calls fail | Clientless token file created alongside the client-qualified one | Delete `keyring/token:user@gmail.com`; use `--client` on all calls |
 | `aes.KeyUnwrap(): integrity check failed` on every call | Token file encrypted with a different password than current `.gog_pw` | Restore token file from backup; or re-run `gog auth add` after confirming `.gog_pw` is correct. Do NOT run `gog auth add --force-consent` to fix this — it will write a new file with the current password but only the scopes you request, silently discarding other scopes. |
+| HTTP 400 on every API call, including token refresh | Google revoked the refresh token (security event, password change, too many sessions, or extended inactivity). This is a Google-side revocation — the keyring file is intact but the stored token is no longer honored. | Check token file size: if larger than ~2KB, delete it first (prior failed re-auth attempts corrupt the file by appending). Then re-run `gog login <account> --manual --force-consent` and enter the passphrase from `.gog_pw`. |
 | "Access blocked: [App] has not completed Google verification" (403) | OAuth app uses sensitive scopes (gmail) and is not verified; common after running `gog auth add` against wrong Google Cloud project | Confirm you are in the correct project (check client_id in `gog auth list` vs your `credentials.json`). For personal-use apps, unpublish and re-add your account as a test user, then retry. |

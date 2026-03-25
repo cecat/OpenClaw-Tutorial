@@ -706,6 +706,11 @@ TZ=America/Chicago
 5    4 * * 0,2,4,6  run-notify.sh --no-email  # Sun/Tue/Thu/Sat: sync + Slack only
 0   23 * * 0    run-submission-ramp.sh     # Sunday 23:00: weekly submission ramp chart
 
+# ── Health monitoring ─────────────────────────────────────────────────────────
+0    1 * * *  run-all-tests.sh             # nightly full smoke test suite; output
+                                            # written to shared/reports/smoke-tests-latest.txt
+                                            # (overwrite); read by main health runbook at 09:00 UTC
+
 # ── Session management ────────────────────────────────────────────────────────
 */5  * * * *  monitor-sessions.sh          # log session .jsonl sizes every 5 min;
                                             # alert if approaching reset threshold
