@@ -1,5 +1,12 @@
 # Getting Started with OpenClaw: A Safety-First Approach
-*Revised organization*
+
+This is rather long, but we had to build quite a bit of scaffolding around OpenClaw
+to get functionality that we wanted for more reliable agents doing procedural things,
+scheduling tasks, etc.  You may wish to start with the 
+[Quickstart](https://github.com/cecat/OpenClaw-Tutorial/blob/main/Quickstart.md).
+This is a WIP so please provide feedback (especially if you run into a snag).
+
+C. Catlett (March 27, 2026)
 
 
 ## Contents

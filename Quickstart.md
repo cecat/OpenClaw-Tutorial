@@ -1,6 +1,10 @@
 # OpenClaw Quickstart
 
-Get OpenClaw running on a Linux machine in about 15 minutes, then add integrations.
+Get OpenClaw running on a Linux machine in about 15 minutes, then add integrations. This
+has been tested on a DGX Spark (Ubuntu) but is still a WIP.  For more about prerequisites
+such as Tailscale, specifics about the docker-compose.yml, or additional scaffolding
+to make claws more reliable see the
+[full tutorial](https://github.com/cecat/OpenClaw-Tutorial/blob/main/OpenClaw-Tutorial.md)
 
 **Assumes:** Docker Engine 24+, Docker Compose v2, and basic Linux sysadmin comfort.
 
