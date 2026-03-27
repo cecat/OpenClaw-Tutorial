@@ -212,13 +212,13 @@ The long-term goal of a personal agent deployment is to remove yourself from rou
 The **outbox pattern** is the mechanism we use for review.  An agent writes a draft to queue in an outbox folder (shared among agents), a reviewer approves or rejects, and a cron script handles the actual sending (if approved). The reviewer is either another agent assigned to the task (with precise revivew criteria)  or a human.
 
 ```
-Agent writes draft JSON → outbox/  (status: "pending")
+Agent writes draft JSON → email/outbox/  (status: "pending")
 Reviewer approves → updates JSON in-place (status: "approved", approved_at: <ts>)
-Reviewer rejects  → updates JSON, moves file to rejected/ (includes rejected_reason)
-Cron script sends approved drafts → moves to sent/; logs to shared/logs/email-send.log
+Reviewer rejects  → updates JSON, moves file to email/rejected/ (includes rejected_reason)
+Cron script sends approved drafts → moves to email/sent/; logs to shared/logs/email-send.log
 ```
 
-Approved drafts move from `outbox/` to `sent/`. Rejected drafts are updated with `status: "rejected"` and a `rejected_reason` field, then moved to `rejected/` — the reason is written into the JSON file itself, not the log. The `shared/logs/email-send.log` records delivery confirmations only (timestamps, recipients, send status). A Slack DM notifies the operator of any rejection. The complete mechanism — JSON format, review criteria, directory structure, logging — is covered in Module 7.
+Approved drafts move from `email/outbox/` to `email/sent/`. Rejected drafts are updated with `status: "rejected"` and a `rejected_reason` field, then moved to `email/rejected/` — the reason is written into the JSON file itself, not the log. The `shared/logs/email-send.log` records delivery confirmations only (timestamps, recipients, send status). A Slack DM notifies the operator of any rejection. The complete mechanism — JSON format, review criteria, directory structure, logging — is covered in Module 7.
 
 In our deployment we have three agents: **main** (supervisor — reviews outbox drafts, handles administrative queries), **admin-agent** (clerical — tracks form submissions, produces reports, sends notifications via Slack and email), and **gmail-agent** (Gmail assistant — reads email, drafts replies, manages contacts). All examples in this outline and in the hands-on lab use this three-agent setup.
 
@@ -230,7 +230,7 @@ In our deployment we have three agents: **main** (supervisor — reviews outbox 
 
 As the Gmail agent's drafts prove consistently good over time, we will delegate review to a second agent — likely a smaller, cheaper reasoning model suited to the specific review task. This is also an economic design decision: a capable reasoning model for drafting, a lighter model for reviewing against known criteria, and human oversight only where neither suffices yet.
 
-**The principle generalizes beyond email.** Any outbound action with real-world consequences — a Slack post to a public channel, an API call that modifies an external record — can use the same pattern. We have partially implemented this for Slack (a `slack-outbox/` and `slack-sent/` directory exist; a review step is not yet in place). Module 7 covers the full pattern, including how to extend it to other channels.
+**The principle generalizes beyond email.** Any outbound action with real-world consequences — a Slack post to a public channel, an API call that modifies an external record — can use the same pattern. We have partially implemented this for Slack (a `slack/outbox/` and `slack/sent/` directory exist; a review step is not yet in place). Module 7 covers the full pattern, including how to extend it to other channels.
 
 This is a living architecture, not a final answer. What we describe here is our current state; it will change as our agents earn more autonomy.
 
@@ -330,9 +330,13 @@ A **session** in OpenClaw is a conversation history file (`.jsonl`) stored in th
 
 **The latency dimension:** LLM generation runs sequentially at roughly 50–100 tps on a capable local GPU. Prefill — processing the entire input, including session history — runs in parallel and is much faster, typically 1–3 seconds for a typical context. But session history grows without a hard cap, while the system prompt is bounded at 150K characters. A long-running session eventually makes every interaction noticeably slower.
 
-**Our practice:** We reset sessions nightly via `reset-sessions.sh` (run at 2 AM via cron). The script archives any session file larger than 512 KB and truncates it to zero; the agent starts fresh from its Sacred Eight files on the next heartbeat. This also reinforces the scheduling architecture: the agent cannot rely on remembering what it did in a previous session — any state that must survive a reset must live in the Sacred Eight files, `PATHS.md`, `CALENDAR.md`, or the shared filesystem.
+**Our practice:** We reset sessions via `reset-sessions.sh`, run four times a day (2 AM, 8 AM, 2 PM, 8 PM local time). The script archives any session file larger than **128 KB** and truncates it to zero; the agent starts fresh from its Sacred Eight files on the next heartbeat. This also reinforces the scheduling architecture: the agent cannot rely on remembering what it did in a previous session — any state that must survive a reset must live in the Sacred Eight files, `PATHS.md`, `CALENDAR.md`, or the shared filesystem.
 
-**Active agents accumulate sessions faster than you expect.** OpenClaw's native `pruneHeartbeatTranscript` function clears session history only for heartbeat runs that produce no output — meaning empty or skipped runs. An active heartbeat agent, one that does real work on every heartbeat (reading email, posting to Slack, processing TODOs), will see its session grow continuously between nightly resets. If the nightly reset fails to run — for instance, because the script's execute bit was stripped — the session will keep growing and eventually overflow the model's context window. When this happens, the agent silently fails with a 5-minute timeout on every subsequent heartbeat. The nightly reset is therefore not a nice-to-have; it is the primary protection against context window overflow for active agents.
+**Active agents accumulate sessions faster than you expect.** OpenClaw's native `pruneHeartbeatTranscript` function clears session history only for heartbeat runs that produce no output — meaning empty or skipped runs. An active heartbeat agent, one that does real work on every heartbeat (reading email, posting to Slack, processing TODOs), will see its session grow continuously between resets. If the reset fails to run — for instance, because the script's execute bit was stripped — the session will keep growing and eventually overflow the model's context window. When this happens, the agent silently fails with a 5-minute timeout on every subsequent heartbeat. The reset is therefore not a nice-to-have; it is the primary protection against context window overflow for active agents.
+
+**Email agents are the extreme case.** An agent that triages a busy Gmail inbox faces a compounding problem: on every inbox-analysis heartbeat, it fetches email messages and analyses them — and all of that content (message headers, snippets, and especially full body text) flows into LLM context as part of the tool call results. If the agent fetches full message bodies for every unread message, a single inbox-analysis run can inject 400 KB or more of email content into the session history. The next heartbeat carries all of that forward, and grows it further. In practice we observed a freshly-reset session reaching 1.2 MB within six hours — triggering the smoke test alarm — even with a nightly reset in place.
+
+The fix is two-part: (1) use `--format headers` (which includes a ~200-char snippet) for all bulk email searches, and only fetch `--format full` for the small number of messages that pass an actionable filter; (2) run the reset script more frequently — four times a day rather than once — with a lower threshold (128 KB instead of 512 KB) so the session never accumulates more than a few hours of content. See Lesson 11 in the Appendix.
 
 **Execute permissions are critical.** All cron scripts must have the execute bit set (`chmod +x`). A script invoked by path without `bash` in the cron entry will silently fail every night if the execute bit is missing — no error is logged, and the failure may go unnoticed for days or weeks while sessions accumulate. Verify permissions after any git operation that might strip them:
 
@@ -342,7 +346,7 @@ ls -la scripts/*.sh   # all should show -rwxrwxr-x or similar
 
 The infrastructure smoke test suite (`run-infrastructure-tests.sh`) includes an execute-permission check for all cron scripts.
 
-**Resetting after a behavioral change:** When you edit an agent's `.md` files and need the agent to adopt the new behavior immediately (not wait for the 3 AM nightly reset), use `reset-session.sh`:
+**Resetting after a behavioral change:** When you edit an agent's `.md` files and need the agent to adopt the new behavior immediately (not wait for the next scheduled reset), use `reset-session.sh`:
 
 ```bash
 bash scripts/reset-session.sh <agent-id> --reason "Updated EMAIL.md rate limits"
@@ -354,9 +358,10 @@ The script archives all session files for the named agent, truncates them to zer
 
 ```bash
 # Session management scripts (run via cron on host — see §5.5 for full crontab)
-*/5  * * * *  monitor-sessions.sh   # log .jsonl sizes; alert if growing large
-0    2 * * *  reset-sessions.sh     # archive >512KB sessions; truncate to zero
-*/30 * * * *  seed-sessions.sh      # restore missing heartbeat session files
+*/5        * * * *  monitor-sessions.sh   # log .jsonl sizes; alert if growing large
+0  2,8,14,20 * * *  reset-sessions.sh     # archive >128KB sessions, truncate to zero
+                                           # 4x/day: 2am, 8am, 2pm, 8pm local
+*/30       * * * *  seed-sessions.sh      # restore missing heartbeat session files
 ```
 
 ---
@@ -457,9 +462,11 @@ OpenClaw-Tutorial/               ← your private repo
 │   ├── secrets.yaml             # gitignored — API keys
 │   └── apply-config.sh
 ├── shared/                      ← runtime state shared across all agents
-│   ├── outbox/ sent/ rejected/  # email review queue
-│   ├── slack-outbox/ slack-sent/
-│   ├── todos/                   # calendar-state.json (scheduling state)
+│   ├── email/                   # email review queue
+│   │   ├── outbox/ sent/ rejected/
+│   ├── slack/                   # Slack post queue and archive
+│   │   └── outbox/ sent/
+│   ├── state/                   # scheduling state, agent state files (JSON)
 │   └── logs/                    # all script and cron logs (single location)
 ├── main/                        ← supervisory agent (full file listing shown here)
 │   ├── SOUL.md                  # Sacred Eight
@@ -481,7 +488,7 @@ OpenClaw-Tutorial/               ← your private repo
 
 `admin-agent` and `gmail-agent` have the same Sacred Eight files and supporting files as `main`. Only `gmail-agent` adds a `scripts/` directory for deterministic API tools.
 
-**`shared/logs/` — the single log directory.** All cron scripts and pipeline scripts write their output to `shared/logs/` rather than to separate subdirectories. This makes troubleshooting straightforward: when something goes wrong, there is exactly one place to look. The log files are named by function: `notify.log` (nightly sync pipeline), `todos.log` (task lifecycle — READY promotions, COMPLETED removals), `todos-cron.log` (raw cron stdout from `check-todos.sh`), `sessions-cron.log`, `sessions-monitor.log`, `sessions-seed.log`, `sessions-reset.log`, `slack-posts.log`, and `email-send.log`. The `shared/todos/` and `shared/sessions/` directories continue to hold their non-log data files (`calendar-state.json`, session `.jsonl` files, etc.).
+**`shared/logs/` — the single log directory.** All cron scripts and pipeline scripts write their output to `shared/logs/` rather than to separate subdirectories. This makes troubleshooting straightforward: when something goes wrong, there is exactly one place to look. The log files are named by function: `notify.log` (nightly sync pipeline), `todos.log` (task lifecycle — READY promotions, COMPLETED removals), `todos-cron.log` (raw cron stdout from `check-todos.sh`), `sessions-cron.log`, `sessions-monitor.log`, `sessions-seed.log`, `sessions-reset.log`, `slack-posts.log`, and `email-send.log`. The `shared/state/` directory holds non-log state files (`calendar-state.json` and other agent state JSON). Session `.jsonl` files live in `shared/sessions/`.
 
 ### E1.5 Security Hardening Checklist
 
@@ -592,7 +599,7 @@ Beyond token cost: the agent must remember whether it already ran the task today
 
 **What is a session?** In OpenClaw, a session is a conversation history file (`.jsonl`) stored in the gateway's persistent Docker volume. Each agent maintains its own session; within that, different Slack channels and the heartbeat each have their own sub-session. A session accumulates every exchange — user messages, agent responses, tool calls, and results — as an append-only log. Crucially, sessions survive gateway restarts: when the gateway comes back up, it picks up the history where it left off.
 
-**Session reset** is not a native OpenClaw operation — it is our addition. OpenClaw never resets sessions on its own; they grow indefinitely. Our `reset-sessions.sh` script (run nightly via cron) archives any session file larger than 512 KB and truncates it to zero. The agent starts fresh on the next heartbeat, reading its identity and context from the Sacred Eight files rather than from accumulated history. When you deliberately change agent behavior, you should reset the relevant session immediately rather than waiting for the nightly job.
+**Session reset** is not a native OpenClaw operation — it is our addition. OpenClaw never resets sessions on its own; they grow indefinitely. Our `reset-sessions.sh` script (run 4× daily via cron) archives any session file larger than 128 KB and truncates it to zero. The agent starts fresh on the next heartbeat, reading its identity and context from the Sacred Eight files rather than from accumulated history. When you deliberately change agent behavior, you should reset the relevant session immediately rather than waiting for the nightly job.
 
 **Why HEARTBEAT.md must be stable:** Beyond the token-efficiency argument (the 672-heartbeats-per-week table), HEARTBEAT.md is consulted on every heartbeat for the lifetime of the agent. A mistake introduced while editing it — a typo, a malformed step, a removed closing line — can silently impair or disable the agent's core reflexes until caught and corrected. Keep HEARTBEAT.md lean and stable: infrastructure reflexes only, never task-specific procedures. Those belong in runbooks, where they can be changed without risking the heartbeat loop.
 
@@ -633,7 +640,7 @@ check-todos.sh  (cron, every 5 min, zero tokens)
   │
   ├─ Reads CALENDAR.md
   │    For each entry: is it due today/now AND not already fired today?
-  │    (checks shared/todos/calendar-state.json for last-fired timestamp)
+  │    (checks shared/state/calendar-state.json for last-fired timestamp)
   │    If due: appends  READY | <timestamp> | <task>  to TODO.md
   │    Updates calendar-state.json. CALENDAR.md is never modified.
   │
@@ -654,7 +661,7 @@ OpenClaw heartbeat  (every 15 min, tokens only when READY lines exist)
 
 **State Tracking: calendar-state.json**
 
-`check-todos.sh` needs to know whether a given `CALENDAR.md` entry has already fired today — otherwise it would re-promote recurring items on every 5-minute run. It solves this with a small JSON file on the host: `shared/todos/calendar-state.json`. Each time a recurring entry fires, the script records the entry's key and the current timestamp in this file. On subsequent runs it checks the file before promoting — if the entry already fired within its scheduling window (e.g., today for a DAILY entry, or this week for a MON entry), it is skipped. Because this state lives on the host filesystem rather than in the agent's memory, it survives session resets. An agent that loses its session history at 3 AM will still not re-fire its Monday report on Tuesday, because `calendar-state.json` knows it already ran.
+`check-todos.sh` needs to know whether a given `CALENDAR.md` entry has already fired today — otherwise it would re-promote recurring items on every 5-minute run. It solves this with a small JSON file on the host: `shared/state/calendar-state.json`. Each time a recurring entry fires, the script records the entry's key and the current timestamp in this file. On subsequent runs it checks the file before promoting — if the entry already fired within its scheduling window (e.g., today for a DAILY entry, or this week for a MON entry), it is skipped. Because this state lives on the host filesystem rather than in the agent's memory, it survives session resets. An agent that loses its session history at 3 AM will still not re-fire its Monday report on Tuesday, because `calendar-state.json` knows it already ran.
 
 **⚠️ Registration required when adding a new agent**
 
@@ -695,10 +702,10 @@ TZ=America/Chicago
                                             # TODO entries to READY; zero LLM tokens
 
 # ── Outbox processing ─────────────────────────────────────────────────────────
-*/30 * * * *  send-approved-emails.sh      # send approved outbox drafts via Gmail API;
-                                            # move to sent/; archive rejected/
+*/30 * * * *  send-approved-emails.sh      # send approved email/outbox/ drafts via Gmail API;
+                                            # move to email/sent/; archive email/rejected/
 */5  * * * *  send-slack-posts.sh          # drain Slack post queue; post via
-                                            # chat.postMessage; archive to slack-sent/
+                                            # chat.postMessage; archive to slack/sent/
 
 # ── Scheduled pipeline runs ───────────────────────────────────────────────────
 0    4 * * 1,3,5  run-notify.sh            # Mon/Wed/Fri: sync sheets + Slack post +
@@ -714,10 +721,9 @@ TZ=America/Chicago
 # ── Session management ────────────────────────────────────────────────────────
 */5  * * * *  monitor-sessions.sh          # log session .jsonl sizes every 5 min;
                                             # alert if approaching reset threshold
-0    2 * * *  reset-sessions.sh            # archive sessions >512KB, truncate to zero;
-                                            # agent restarts clean from Sacred Eight files
-0   14 * * *  reset-sessions.sh            # afternoon reset — same operation; reduces max
-                                            # session age from 24h to ~12h
+0  2,8,14,20 * * *  reset-sessions.sh      # archive sessions >128KB, truncate to zero;
+                                            # 4x/day (2am, 8am, 2pm, 8pm local) — keeps
+                                            # active email agents under context threshold
 */30 * * * *  seed-sessions.sh             # restore missing heartbeat session files after
                                             # gateway restarts; also detects stalled heartbeat
                                             # sessions (no new lines in two consecutive 30-min
@@ -885,7 +891,7 @@ scripts/run-infrastructure-tests.sh
 | Test 2 | All expected cron entries present in crontab | Detects missing or accidentally-deleted cron jobs |
 | Test 3 | `openclaw-gateway` container is running | Prerequisite for all agent operation |
 | Test 4 | Gateway container is healthy (not restarting) | Detects crash-loop and config problems |
-| Test 5 | No session files above 512 KB threshold | Early warning that a nightly reset failed or an agent is accumulating fast |
+| Test 5 | No session files above 128 KB threshold | Early warning that a reset failed or an agent (especially an email agent) is accumulating fast |
 | Test 6 | Heartbeat seed files (`main.jsonl`) present for all agents | Detects missing session files that cause silent heartbeat failures |
 | Test 7 | `check-todos.sh` runs without error | Scheduling engine health |
 | Test 8 | `monitor-sessions.sh` runs without error | Session monitoring health |
@@ -909,7 +915,7 @@ The outbox/review/send pattern is our third scaffolding component, built on top 
 
 The email outbox is our reference implementation of the pattern. The drafting agent writes a JSON file to a shared queue; the reviewing agent (or human) approves or rejects by updating that file; a cron script sends approved drafts and archives the results. No LLM is involved in the send step.
 
-**A note on human vs. agent review and file manipulation:** The reviewing agent (main) is the sole entity that writes to, moves, or deletes files in `outbox/` and `rejected/`. This applies to human-directed decisions as well: when a human wants to approve or reject an email, they communicate their decision to main via Slack DM, and main performs the file operation. This keeps the audit trail consistent (all file state changes come from one actor) and prevents a human from accidentally corrupting a JSON file with a manual edit. If main finds an outbox file that appears to have been edited manually, it flags the file and holds it for inspection rather than processing it.
+**A note on human vs. agent review and file manipulation:** The reviewing agent (main) is the sole entity that writes to, moves, or deletes files in `email/outbox/` and `email/rejected/`. This applies to human-directed decisions as well: when a human wants to approve or reject an email, they communicate their decision to main via Slack DM, and main performs the file operation. This keeps the audit trail consistent (all file state changes come from one actor) and prevents a human from accidentally corrupting a JSON file with a manual edit. If main finds an `email/outbox/` file that appears to have been edited manually, it flags the file and holds it for inspection rather than processing it.
 
 **JSON format** (written by the drafting agent as an atomic `.tmp` rename):
 ```json
@@ -939,12 +945,13 @@ The email outbox is our reference implementation of the pattern. The drafting ag
 **Directory structure:**
 ```
 shared/
-├── outbox/        ← pending drafts
-├── sent/          ← delivered emails (moved here by cron after send)
-└── rejected/      ← rejected drafts; rejected_reason field in each JSON file
+└── email/
+    ├── outbox/    ← pending drafts
+    ├── sent/      ← delivered emails (moved here by cron after send)
+    └── rejected/  ← rejected drafts; rejected_reason field in each JSON file
 ```
 
-**`send-approved-emails.sh`** (cron, every 30 min — our addition, not native OpenClaw): scans `outbox/` for files with `status: approved`, sends via Gmail API, moves to `sent/`, appends to `shared/logs/email-send.log`. Recipient resolution at send time: if the outbox JSON contains a `to_name` field (full name), the script calls `gog contacts search` to look up the email address from Google Contacts — Google Contacts is the single source of truth for email addresses. If the name is not found, the email is moved to `rejected/` with a clear log entry. If the outbox JSON contains a `to` field (email address directly, used for dry-run overrides), it is used as-is.
+**`send-approved-emails.sh`** (cron, every 30 min — our addition, not native OpenClaw): scans `email/outbox/` for files with `status: approved`, sends via Gmail API, moves to `email/sent/`, appends to `shared/logs/email-send.log`. Recipient resolution at send time: if the outbox JSON contains a `to_name` field (full name), the script calls `gog contacts search` to look up the email address from Google Contacts — Google Contacts is the single source of truth for email addresses. If the name is not found, the email is moved to `rejected/` with a clear log entry. If the outbox JSON contains a `to` field (email address directly, used for dry-run overrides), it is used as-is.
 
 **Review criteria — our implementation choices, not scaffolding requirements:** The review logic lives in the supervisor agent's `EMAIL.md`. What follows is our current policy; every deployment will define its own criteria.
 - No more than 10 emails per 24 hours to any single recipient (rate limit)
@@ -956,13 +963,13 @@ These are examples. A different deployment might permit 50 emails per day, accep
 
 ### E5.2 Adding Review to Slack: A Step-by-Step Example
 
-The Slack outbox infrastructure already exists in our deployment (`shared/slack-outbox/`, `shared/slack-sent/`, `shared/logs/slack-posts.log`), providing an audit trail for all outbound posts. A review step has not yet been added. The following is how to implement one — and how to extend the same pattern to any other channel.
+The Slack outbox infrastructure already exists in our deployment (`shared/slack/outbox/`, `shared/slack/sent/`, `shared/logs/slack-posts.log`), providing an audit trail for all outbound posts. A review step has not yet been added. The following is how to implement one — and how to extend the same pattern to any other channel.
 
 **Step 1 — Create the review criteria file.** Add `SLACK.md` to the supervisor agent's (`main/`) workspace directory. Define the criteria: acceptable channels, rate limits, content rules. This mirrors the role of `EMAIL.md` for email.
 
-**Step 2 — Add a review step to the supervisor's heartbeat.** In `main/HEARTBEAT.md`, after the existing email outbox review step, add: "Check `shared/slack-outbox/` for pending posts. For each, apply the criteria in SLACK.md. Approve (update status to `approved`) or reject (update status to `rejected`, add `rejected_reason`, move to `shared/slack-rejected/`)."
+**Step 2 — Add a review step to the supervisor's heartbeat.** In `main/HEARTBEAT.md`, after the existing email outbox review step, add: "Check `shared/slack/outbox/` for pending posts. For each, apply the criteria in SLACK.md. Approve (update status to `approved`) or reject (update status to `rejected`, add `rejected_reason`, move to `shared/slack/rejected/`)."
 
-**Step 3 — Create the rejected directory.** `mkdir -p shared/slack-rejected/`
+**Step 3 — Create the rejected directory.** `mkdir -p shared/slack/rejected/`
 
 **Step 4 — Update `send-slack-posts.sh`.** Modify the script to check for `status: approved` before posting (currently it posts all pending items). This is the only code change required.
 
@@ -974,11 +981,11 @@ The same five-step pattern — criteria file, heartbeat step, rejected directory
 
 | Component | Email (implemented) | Slack (partial — review not yet added) | Generic |
 |---|---|---|---|
-| Agent writes to | `outbox/<file>.json` | `slack-outbox/<file>.json` | `<channel>-outbox/` |
+| Agent writes to | `email/outbox/<file>.json` | `slack/outbox/<file>.json` | `<channel>-outbox/` |
 | Review criteria | `EMAIL.md` in supervisor | `SLACK.md` *(to add)* | `<CHANNEL>.md` |
 | Reviewer heartbeat step | In `main/HEARTBEAT.md` | *(to add)* | Add to supervisor's HEARTBEAT.md |
 | Send script | `send-approved-emails.sh` | `send-slack-posts.sh` | Write per channel |
-| Archive | `sent/`, `rejected/` | `slack-sent/`, `slack-rejected/` *(to add)* | Per channel |
+| Archive | `email/sent/`, `email/rejected/` | `slack/sent/`, `slack/rejected/` *(to add)* | Per channel |
 | Audit log | `shared/logs/email-send.log` | `shared/logs/slack-posts.log` | `shared/logs/` |
 
 The deterministic send script and the append-only audit log are always present. The criteria file, the heartbeat step, and the rejected directory are what you add for each new channel.
@@ -1024,7 +1031,7 @@ channels:
     agent: admin-agent
 ```
 
-**The outbound post problem:** Agents can reply within active Slack sessions. They cannot initiate a post when no session is active (e.g., a scheduled overnight report). The slack-outbox pattern handles this: the agent writes JSON to `shared/slack-outbox/` and `send-slack-posts.sh` (cron, every 5 minutes) posts via the Slack `chat.postMessage` API and archives to `slack-sent/`.
+**The outbound post problem:** Agents can reply within active Slack sessions. They cannot initiate a post when no session is active (e.g., a scheduled overnight report). The slack-outbox pattern handles this: the agent writes JSON to `shared/slack/outbox/` and `send-slack-posts.sh` (cron, every 5 minutes) posts via the Slack `chat.postMessage` API and archives to `slack/sent/`.
 
 ### I.2 Credential Handling for External Services
 
@@ -1060,7 +1067,7 @@ We use two different approaches to reach Google services:
 
 **Sharing agent output with users via Google Drive**
 
-For ad-hoc output — analysis results, generated reports, data exports — agents can upload files to a shared Google Drive folder and give users the link. This keeps ad-hoc output out of `/shared/outbox/` (a JSON-only message queue) and away from the email/Slack pipelines (which require approval).
+For ad-hoc output — analysis results, generated reports, data exports — agents can upload files to a shared Google Drive folder and give users the link. This keeps ad-hoc output out of `/shared/email/outbox/` (a JSON-only message queue) and away from the email/Slack pipelines (which require approval).
 
 Create the shared folder using the **agent's Google account** (e.g., `tpc26agent@gmail.com`). Because the agent *owns* the folder, no separate write-access grant is needed — account ownership is the write credential. Set the folder sharing to **"Anyone with the link → Viewer"** so recipients can open files without signing in.
 
@@ -1149,7 +1156,7 @@ How it manifests:
 - An agent drafts and sends a "helpful" follow-up email to a contact who appeared in your inbox in an ambiguous context. The email is well-written and completely wrong for the situation. It cannot be unsent.
 - A scheduled overnight summary task runs, and the agent's interpretation of "summarize" is slightly off. The result goes directly to a team Slack channel at 6am. Forty people see it before you wake up.
 
-The fix: agent writes to `outbox/` with status `pending`. Nothing sends until status is set to `approved` — by a human, or by a designated supervisor agent operating under its own SOUL.md constraints. A deterministic cron script sends approved items and archives everything. The audit trail in `sent/` and `rejected/` gives you a complete record.
+The fix: agent writes to `email/outbox/` with status `pending`. Nothing sends until status is set to `approved` — by a human, or by a designated supervisor agent operating under its own SOUL.md constraints. A deterministic cron script sends approved items and archives everything. The audit trail in `email/sent/` and `email/rejected/` gives you a complete record.
 
 ---
 
@@ -1228,6 +1235,27 @@ How it manifests:
 The fix: every error handler in HEARTBEAT.md must end with `HEARTBEAT_OK`, not with a stop or return. The correct pattern is: write the Slack alert, *then* respond `HEARTBEAT_OK`. The heartbeat ran; it encountered a problem it has reported; it should be scheduled to run again in 15 minutes. Stopping without `HEARTBEAT_OK` is the wrong mental model — it treats the heartbeat like a transaction that must succeed fully or not at all. Heartbeats are not transactions. They are periodic health checks, and a check that ran and reported a problem is a successful check.
 
 The stall watchdog in `seed-sessions.sh` provides an automatic safety net: if a heartbeat session accumulates no new lines in two consecutive 30-minute checks, the script truncates and reseeds the session file, forcing a clean restart. This catches stalls regardless of cause — including bugs not yet identified. It does not replace the `HEARTBEAT_OK` fix; it is a backstop for cases where the fix was not applied or where a new failure mode is encountered.
+
+---
+
+---
+
+**Lesson 11: LLM-processed external content is session history too — and it accumulates**
+
+The general principle: anything that flows through a tool call and into LLM context is session history. This includes not just the agent's own messages and runbook steps, but also the content of every external resource the agent reads — email bodies, document text, API responses, log files. An agent that reads large external resources on every heartbeat is inflating its session history by the size of those resources on every run.
+
+How it manifests:
+- An inbox-analysis heartbeat fetches 100 email messages with `--format full` (up to 4,000 characters of body text each). That is ~400 KB of email content injected into the session on a single run. The next heartbeat carries the full 400 KB forward in its context and adds another 400 KB. A freshly-reset session can hit 1 MB within six hours.
+- The smoke test alarm fires every morning: "Session file above threshold." The session was reset at 3 AM; by 8 AM it is already oversized. The culprit is not the heartbeat cadence — it is the volume of external content the agent reads on every cycle.
+- Reducing the heartbeat frequency does not help. The content volume per run is the problem, not the run frequency.
+
+The fix — two-pass triage:
+1. Fetch only headers and snippets for all messages. Headers (`--format headers`) return sender, subject, date, and a ~200-character body preview — enough to classify the message.
+2. For the small fraction of messages that pass the filter (messages from known contacts, messages with urgency signals, meeting requests), fetch the full body selectively.
+
+This is not just about email. The same principle applies to any agent that reads large external data sources — log files, document stores, database query results. The design question is: what is the minimum information the LLM actually needs to reason about this item? Fetch only that. Structured outputs (classifications, action items) are small; they should replace the raw input in the context rather than supplement it.
+
+The general rule of thumb: if your agent reads N items per heartbeat, the per-item data volume should be at most a few hundred tokens per item, not thousands. Budget your external data fetches the same way you budget your runbook steps — not with how much you *could* read, but with how little you actually need.
 
 ---
 
