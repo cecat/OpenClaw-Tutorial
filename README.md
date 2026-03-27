@@ -10,4 +10,4 @@ Eventually this will evolve into a tutorial (both lecture and hands-on) on getti
 
 - [Gateway](https://github.com/cecat/OpenClaw-Tutorial/tree/main/gateway) - things you need to fire up an OpenClaw gateway (including docker-compose and various config files - see Quickstart).
 
-- Various step-by-step for adding capabilities like Slack, Google Drive, and Gmail/Calendar.
+- [Integrations](https://github.com/cecat/OpenClaw-Tutorial/tree/main/Integrations) - Various step-by-step for adding capabilities like Slack, Google Drive, and Gmail/Calendar.
