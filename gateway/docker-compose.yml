@@ -1,0 +1,71 @@
+# docker-compose.yml — OpenClaw gateway (cloud API edition)
+#
+# For use with Anthropic, OpenAI, or other cloud API providers.
+# For local vLLM (GPU server), also apply docker-compose.local.yml.
+#
+# BEFORE FIRST USE:
+#   cp .env.example .env
+#   # Edit .env with your values
+#   cp secrets.yaml.example secrets.yaml
+#   # Edit secrets.yaml with your API key
+#
+# Security notes:
+#   DO NOT change the port binding to 0.0.0.0 — this exposes the dashboard
+#     to your LAN and potentially the internet (CVE-2026-25253).
+#   DO NOT add volume mounts for ~/.ssh, ~/, or /etc.
+#   DO NOT override the user: directive — OpenClaw must run as non-root (uid 1000).
+#   Credential mounts follow a strict pattern: specific ~/.config/<tool> subdir,
+#     read-only. Add new credentials only in this pattern.
+
+services:
+  openclaw-gateway:
+    image: ghcr.io/openclaw/openclaw:latest
+    container_name: openclaw-gateway
+    restart: unless-stopped
+    ports:
+      # Bind to Tailscale IP only — not 0.0.0.0
+      - "${TAILSCALE_IP}:18789:18789"
+    group_add:
+      # Docker group GID — allows gateway to spawn sandbox containers
+      # Find yours with: getent group docker | cut -d: -f3
+      - "${DOCKER_GID}"
+    volumes:
+      # OpenClaw config and memory (internal)
+      - openclaw-config:/home/node/.openclaw
+      # Agent workspace — the ONLY host directory agents can read/write
+      - ${OPENCLAW_WORKSPACE}:/home/node/agents:rw
+      # Same-path mount required: OpenClaw uses the host path from openclaw.json
+      # as the Docker bind source when spawning sandbox containers. Without this,
+      # sandboxes get empty root-owned dirs instead of the workspace contents.
+      - ${OPENCLAW_WORKSPACE}:${OPENCLAW_WORKSPACE}:rw
+      # Docker binary and socket — required to spawn sandbox containers
+      - /usr/bin/docker:/usr/bin/docker:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      #
+      # ── Integration credential mounts ──────────────────────────────────────
+      # Uncomment as you add integrations. See the relevant integration guide.
+      #
+      # Slack (added by Slack-Integration.md):
+      # - ${USER_HOME}/.config/slack:${USER_HOME}/.config/slack:ro
+      #
+      # Google / gog (added by GOG-Integration.md):
+      # - ${USER_HOME}/.config/gogcli:${USER_HOME}/.config/gogcli:ro
+      # - ${USER_HOME}/.local/share/keyrings:${USER_HOME}/.local/share/keyrings:ro
+      # - /usr/local/bin/gog:/usr/local/bin/gog-real:ro
+      # - ${USER_HOME}/.local/bin/gog-wrap:/usr/local/bin/gog:ro
+      # - ${USER_HOME}/.agents:${USER_HOME}/.agents:ro
+    environment:
+      - NODE_ENV=production
+      # API keys are managed by apply-config.sh via openclaw.json — not set here.
+    # Runs as non-root node user (uid 1000) — do not override
+
+  openclaw-cli:
+    image: ghcr.io/openclaw/openclaw:latest
+    profiles:
+      - cli
+    volumes:
+      - openclaw-config:/home/node/.openclaw
+    entrypoint: ["node", "dist/index.js"]
+
+volumes:
+  openclaw-config:

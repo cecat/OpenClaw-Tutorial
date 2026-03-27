@@ -1,0 +1,35 @@
+# config.yaml — Agent configuration
+#
+# Edit this file to assign models to agents and bind Slack channels.
+# Then run:  python3 apply-config.sh
+#
+# ── Model assignments ─────────────────────────────────────────────────────────
+#
+# Model format: provider/model-id
+#
+# Anthropic cloud API (requires anthropic_api_key in secrets.yaml):
+#   anthropic/claude-haiku-4-5      fast, low cost     ($1 in / $5 out per M tokens)
+#   anthropic/claude-sonnet-4-6     balanced (recommended default)
+#   anthropic/claude-opus-4-6       most capable
+#
+# Local vLLM (requires docker-compose.local.yml):
+#   vllm/<model-id>                 e.g. vllm/Qwen/Qwen3-Coder-Next-FP8
+
+agents:
+  main:
+    model: anthropic/claude-sonnet-4-6
+
+# ── Slack channel → agent bindings ───────────────────────────────────────────
+#
+# Maps Slack channel IDs to agents. The default agent (main) handles all DMs
+# and any channel not listed here.
+#
+# To find a channel ID: right-click the channel in Slack → View channel details
+# → copy the ID at the bottom of the About tab (starts with C).
+#
+# Uncomment and fill in after completing Slack-Integration.md:
+
+# channels:
+#   - id: C0123456789
+#     name: "#my-agent-channel"
+#     agent: main

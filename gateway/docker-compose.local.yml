@@ -1,0 +1,31 @@
+# docker-compose.local.yml — Override for local vLLM (GPU server)
+#
+# Apply on top of docker-compose.yml when using a local model via vLLM:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+#
+# This override adds the nim_net network so the gateway can reach vLLM,
+# and sets OPENAI_API_BASE to point at the local inference server.
+#
+# Prerequisites:
+#   - vLLM must be running (started via its own docker-compose.yml)
+#   - The network name below must match: <vllm-compose-dir>_nim_net
+
+services:
+  openclaw-gateway:
+    environment:
+      - OPENAI_API_BASE=http://nim:8000/v1
+      - OPENAI_API_KEY=dummy
+    networks:
+      - nim_net
+
+  openclaw-cli:
+    networks:
+      - nim_net
+
+networks:
+  nim_net:
+    external: true
+    name: ${VLLM_NETWORK:-qwen3-coder-next_nim_net}
+    # The network is created by your vLLM docker-compose.yml.
+    # Override with: VLLM_NETWORK=<your-compose-dir>_nim_net
