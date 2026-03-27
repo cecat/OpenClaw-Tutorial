@@ -135,9 +135,9 @@ docker logs openclaw-gateway --tail 50
 
 | Add-on | What it enables | Guide |
 |--------|----------------|-------|
-| **Slack** | Agents post and receive messages via Slack | [Slack-Integration.md](Slack-Integration.md) |
-| **Gmail** | Personal email assistant agent | [Google-Integration.md](Google-Integration.md) + [GOG-Integration.md](GOG-Integration.md) |
-| **Google Drive / Sheets / Contacts** | Agents read and write Google Workspace | [GOG-Integration.md](GOG-Integration.md) |
+| **Slack** | Agents post and receive messages via Slack | [Slack-Integration.md](Integrations/Slack-Integration.md) |
+| **Gmail** | Personal email assistant agent | [Google-Integration.md](Integrations/Google-Integration.md) + [GOG-Integration.md](Integrations/GOG-Integration.md) |
+| **Google Drive / Sheets / Contacts** | Agents read and write Google Workspace | [GOG-Integration.md](Integrations/GOG-Integration.md) |
 
 Each guide tells you which credential bind mounts to uncomment in
 `gateway/docker-compose.yml` and what to add to `config.yaml`.

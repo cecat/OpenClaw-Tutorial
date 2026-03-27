@@ -1006,7 +1006,7 @@ The deterministic send script and the append-only audit log are always present. 
 
 Slack is connected to the **OpenClaw gateway** — not directly to individual agents. The gateway receives all incoming Slack messages and routes them to the appropriate agent based on channel or DM. The agents never interact with Slack directly; everything flows through the gateway and `openclaw.json` configuration.
 
-*(Full step-by-step setup is in `Slack-Integration.md` in this repository. The following is an overview sufficient for slide-level discussion.)*
+*(Full step-by-step setup is in `Integrations/Slack-Integration.md` in this repository. The following is an overview sufficient for slide-level discussion.)*
 
 **On the Slack side** — three things to configure at api.slack.com/apps:
 - Create a Slack app with Socket Mode enabled. Socket Mode lets OpenClaw receive events over a persistent WebSocket rather than requiring a public inbound URL.
@@ -1043,7 +1043,7 @@ Any integration that requires authentication — Google, Slack, or other service
 
 The key question when setting up a new credential mount: *who refreshes the token?* If the host script refreshes it, use `:ro`. If the sandbox refreshes it, use `:rw` — but audit carefully, since a writable credential mount is a higher-risk surface.
 
-This applies identically to Google OAuth tokens, Slack bot tokens stored on disk, or any other credential file. Each integration section below notes its specific mount requirements. *(See `Google-Integration.md` and `Slack-Integration.md` in this repository for full setup detail.)*
+This applies identically to Google OAuth tokens, Slack bot tokens stored on disk, or any other credential file. Each integration section below notes its specific mount requirements. *(See `Integrations/Google-Integration.md` and `Integrations/Slack-Integration.md` in this repository for full setup detail.)*
 
 ### I.3 Google — Two Integration Paths
 
@@ -1056,14 +1056,14 @@ We use two different approaches to reach Google services:
 
 **Why two approaches?** `gog` uses Google's `threads.list` API for Gmail, which returns only the first message of a thread and ignores `in:sent` filters — unsuitable for inbox triage workflows. Our `gmail_api.py` calls `messages.list` directly, which handles inbox queries correctly. For Sheets, Drive, and outbound email sends, `gog` is the right tool. If your use case doesn't require Gmail inbox reading, `gog` alone may suffice.
 
-**A note on path names:** The Google OAuth `token.json` and `credentials.json` files live in directories named `~/.local/share/gsuite-mcp/` and `~/.config/gsuite-mcp/`. These names are a legacy artifact — the files are standard Google OAuth credentials with no runtime dependency on gsuite-mcp. See `Google-Integration.md` for the full explanation and setup instructions.
+**A note on path names:** The Google OAuth `token.json` and `credentials.json` files live in directories named `~/.local/share/gsuite-mcp/` and `~/.config/gsuite-mcp/`. These names are a legacy artifact — the files are standard Google OAuth credentials with no runtime dependency on gsuite-mcp. See `Integrations/Google-Integration.md` for the full explanation and setup instructions.
 
-**Google Cloud setup** (done once before the lab — full steps in `Google-Integration.md`):
+**Google Cloud setup** (done once before the lab — full steps in `Integrations/Google-Integration.md`):
 - Create a Google Cloud project and enable the APIs you need: Gmail, People, Drive, Sheets as applicable
 - Configure the OAuth consent screen (internal or external depending on your Google Workspace plan)
 - Download `credentials.json` from the API credentials page
 - Run the one-time OAuth browser flow to generate `token.json` (any standard Google OAuth desktop flow tool works)
-- Bind-mount both files into the agent sandbox per the instructions in `Google-Integration.md`
+- Bind-mount both files into the agent sandbox per the instructions in `Integrations/Google-Integration.md`
 
 **Sharing agent output with users via Google Drive**
 
@@ -1084,7 +1084,7 @@ gog drive upload /tmp/report.md \
 
 `--json` returns structured output including `webViewLink` (the URL to share). `--convert` uploads as a Google Doc rather than a raw attachment — preferred for reports the user will read in the browser. After uploading, the agent shares the link in the current channel and cleans up `/tmp/`.
 
-Full setup procedure and command reference: `GOG-Integration.md`.
+Full setup procedure and command reference: `Integrations/GOG-Integration.md`.
 
 ---
 
@@ -1203,7 +1203,7 @@ The fix is architectural, not a mount flag: each runtime environment owns its cr
 
 With this separation, Docker and host never share mutable state. A token refresh inside Docker cannot affect the host's credentials, and vice versa.
 
-The `:ro` mount is a belt-and-suspenders precaution once the credential stores are properly separated — but the root fix is the separation itself. See `GOG-Integration.md` for the specific bind-mount configuration.
+The `:ro` mount is a belt-and-suspenders precaution once the credential stores are properly separated — but the root fix is the separation itself. See `Integrations/GOG-Integration.md` for the specific bind-mount configuration.
 
 ---
 

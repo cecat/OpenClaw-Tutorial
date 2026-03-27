@@ -23,7 +23,7 @@ credentials; the directory names just reflect how they were initially generated.
 this guide refers to "the Google OAuth token" or "the Gmail credentials," it means
 the files at those legacy-named paths.
 
-See `GOG-Integration.md` for gog-specific setup. This guide covers the Google OAuth
+See `GOG-Integration.md` (same `Integrations/` folder) for gog-specific setup. This guide covers the Google OAuth
 credential setup and the Gmail/Contacts workflow.
 
 ---
