@@ -1228,6 +1228,8 @@ Google OAuth integration has more sharp edges than it appears. Several of these 
 
 **Never run `gog auth add` inside a container with `:rw` credential mounts.** A container running `gog auth add` writes back token files with only the scopes *it* requested — silently overwriting any other scopes or accounts that were in the host's keyring. The host's next gog call for those scopes fails with "No auth for X" without any error at write time. Mount `gogcli` as `:ro` in all agent sandbox containers. If a token needs refreshing, do it on the host.
 
+**Changing your Google account password revokes all OAuth refresh tokens for that account.** Google treats a password change as a security event and invalidates all outstanding OAuth grants — both `token.json` and gog keyring tokens — for any account whose password changed. Symptoms: `HTTP 400 invalid_grant` or `HTTP 401 Unauthorized` in agent logs, starting immediately after the password change. The fix is to re-run the full OAuth browser flow for every OAuth app registration that accesses that account. If an account is used by both `token.json` (for direct API scripts) and gog (for CLI commands), both grants need separate renewal — they use different OAuth client registrations and cannot share a single authorization code. Keep per-account renewal scripts in `ops/` and document which script handles which account and which grants.
+
 ---
 
 **Lesson 10: A heartbeat that ends without HEARTBEAT_OK silences the agent until the next session reset**

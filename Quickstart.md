@@ -191,3 +191,37 @@ docker compose down
 # Stop and delete all state (destructive — removes openclaw.json and all memory)
 docker compose down -v
 ```
+
+## Re-authenticating Google accounts
+
+Google OAuth refresh tokens can be revoked in several situations: if you change your
+Google account password, if the OAuth app is still in "Testing" mode (tokens expire
+after 7 days), or if Google's security systems flag a suspicious event. Symptoms are
+`HTTP 400 invalid_grant` or `HTTP 401 Unauthorized` errors in agent logs.
+
+Each Google account that your agents use has its own renewal script in `ops/`:
+
+| Account | Used by | Renewal command |
+|---------|---------|-----------------|
+| `tpc26agent@gmail.com` | chattpc26 scripts (gog CLI) | `bash ops/OAuth-renew.sh` |
+| `cecatlett@gmail.com` | cecat scripts (gmail_api.py + gog CLI) | `bash ops/cecat-oauth-renew.sh` |
+
+Run from your server terminal (the `-t` flag is required when running via ssh, to accept
+the pasted redirect URL):
+
+```bash
+# For tpc26agent@gmail.com
+ssh -t spark-ts 'bash ~/code/spark-ai-agents/ops/OAuth-renew.sh'
+
+# For cecatlett@gmail.com (renews both token.json and gog personal client)
+ssh -t spark-ts 'bash ~/code/spark-ai-agents/ops/cecat-oauth-renew.sh'
+```
+
+Each script prints a Google authorization URL. Open it in a browser, sign in, approve
+the permissions, then copy the full redirect URL from the address bar (even though the
+page says "can't connect") and paste it back into the terminal.
+
+> **Note:** `cecat-oauth-renew.sh` performs two separate browser authorizations —
+> once for `token.json` (used by Python scripts) and once for the gog keyring token
+> (used by gog CLI commands). Both use the same Google account but different OAuth
+> app registrations, so two consent flows are required.

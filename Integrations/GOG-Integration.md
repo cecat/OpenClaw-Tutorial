@@ -441,7 +441,7 @@ Re-authentication is only needed if:
 - You explicitly revoke the app's access in Google account settings
 - The token files are deleted from `~/.config/gogcli/keyring/`
 - You rotate to a new OAuth client
-- **Google revokes the refresh token** — this happens silently and without warning due to security events, password changes, too many concurrent sessions, or extended inactivity. The first symptom is HTTP 400 on every API call; see Part 9.
+- **Google revokes the refresh token** — this happens silently and without warning due to security events, password changes, too many concurrent sessions, or extended inactivity. The first symptom is HTTP 400 on every API call; see Part 9. **Password changes are the most common cause in practice** — Google revokes all OAuth grants for an account the moment its password changes. If you have a dedicated renewal script (e.g., `ops/OAuth-renew.sh`), run it; otherwise use the manual flow below.
 
 It is **not** needed on a regular schedule once the app is published.
 

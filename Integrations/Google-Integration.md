@@ -152,7 +152,35 @@ use `apply-config.sh` if sandbox settings are managed via `config.yaml`.
 
 ---
 
-## Part 5 — Writing Style and Contacts Bootstrap (Optional)
+## Part 5 — Token Renewal
+
+Google OAuth refresh tokens can be revoked in several situations:
+
+- **Google account password change** — Google treats this as a security event and
+  invalidates all OAuth refresh tokens for that account immediately. Both `token.json`
+  and any gog keyring tokens for the account are revoked simultaneously.
+- **Testing mode expiry** — If the OAuth app was not published, refresh tokens expire
+  after 7 days.
+- **Explicit revocation** — Via Google's [connected apps page](https://myaccount.google.com/permissions).
+
+Symptoms: `HTTP 400 invalid_grant` or `HTTP 401 Unauthorized` errors in agent logs.
+
+**Renewal:** re-run the OAuth browser flow to obtain a fresh refresh token. Keep a
+dedicated renewal script in `ops/` (see `ops/cecat-oauth-renew.sh` in the spark-ai-agents
+repo for a reference implementation):
+
+```bash
+bash ops/cecat-oauth-renew.sh
+```
+
+If the same Google account is also accessed via gog (e.g., for Sheets or Drive), that
+grant must be renewed separately — `token.json` and the gog keyring use different OAuth
+client registrations and cannot share a single authorization code. A combined renewal
+script handles both in one session.
+
+---
+
+## Part 6 — Writing Style and Contacts Bootstrap (Optional)
 
 *(To be written)*
 
