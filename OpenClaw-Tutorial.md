@@ -315,7 +315,7 @@ More reliably than secondary files, but not unconditionally. This can be surpris
 
 **Instructions vs. examples.** OpenClaw rebuilds the system prompt from the 8 files on every call — but it *also* sends the full session history (the accumulated back-and-forth since the last session reset). When instruction text and behavioral examples in the history conflict, examples often win. An agent with many examples of old behavior in its session history may not immediately adopt a newly-written rule, even one enshrined in SOUL.md.
 
-**What this means for updates.** Updating a file on disk does not guarantee the agent immediately adopts the new behavior. Any behavioral change requires four steps: (1) edit the right file, (2) reset the session to clear counter-examples from history, (3) explicitly tell the agent about the change in the first message of the new session, (4) verify the next execution follows the new rule. `reset-session.sh` (covered in §4.6) automates step 2 and logs the reason for the reset.
+**What this means for updates.** Updating a file on disk does not guarantee the agent immediately adopts the new behavior. Any behavioral change requires four steps: (1) edit the right file, (2) reset the session to clear counter-examples from history, (3) explicitly tell the agent about the change in the first message of the new session, (4) verify the next execution follows the new rule. `shared/scripts/ops/reset-agent.sh` (covered in §4.6) automates step 2 and logs the reason for the reset.
 
 **Reliability tiers:**
 
@@ -337,7 +337,7 @@ A **session** in OpenClaw is a conversation history file (`.jsonl`) stored in th
 
 **The latency dimension:** LLM generation runs sequentially at roughly 50–100 tps on a capable local GPU. Prefill — processing the entire input, including session history — runs in parallel and is much faster, typically 1–3 seconds for a typical context. But session history grows without a hard cap, while the system prompt is bounded at 150K characters. A long-running session eventually makes every interaction noticeably slower.
 
-**Our practice:** We reset sessions via `reset-sessions.sh`, run four times a day (2 AM, 8 AM, 2 PM, 8 PM local time). The script archives any session file larger than **128 KB** and truncates it to zero; the agent starts fresh from its Sacred Eight files on the next heartbeat. This also reinforces the scheduling architecture: the agent cannot rely on remembering what it did in a previous session — any state that must survive a reset must live in the Sacred Eight files, `PATHS.md`, `CALENDAR.md`, or the shared filesystem.
+**Our practice:** We reset sessions via `shared/scripts/cron/reset-sessions.sh`, run four times a day (2 AM, 8 AM, 2 PM, 8 PM local time). The script archives any session file larger than **128 KB** and truncates it to zero; the agent starts fresh from its Sacred Eight files on the next heartbeat. This also reinforces the scheduling architecture: the agent cannot rely on remembering what it did in a previous session — any state that must survive a reset must live in the Sacred Eight files, `PATHS.md`, `CALENDAR.md`, or the shared filesystem.
 
 **Active agents accumulate sessions faster than you expect.** OpenClaw's native `pruneHeartbeatTranscript` function clears session history only for heartbeat runs that produce no output — meaning empty or skipped runs. An active heartbeat agent, one that does real work on every heartbeat (reading email, posting to Slack, processing TODOs), will see its session grow continuously between resets. If the reset fails to run — for instance, because the script's execute bit was stripped — the session will keep growing and eventually overflow the model's context window. When this happens, the agent silently fails with a 5-minute timeout on every subsequent heartbeat. The reset is therefore not a nice-to-have; it is the primary protection against context window overflow for active agents.
 
@@ -348,15 +348,16 @@ The fix is two-part: (1) use `--format headers` (which includes a ~200-char snip
 **Execute permissions are critical.** All cron scripts must have the execute bit set (`chmod +x`). A script invoked by path without `bash` in the cron entry will silently fail every night if the execute bit is missing — no error is logged, and the failure may go unnoticed for days or weeks while sessions accumulate. Verify permissions after any git operation that might strip them:
 
 ```bash
-ls -la scripts/*.sh   # all should show -rwxrwxr-x or similar
+ls -la shared/scripts/cron/*.sh shared/scripts/ops/*.sh shared/scripts/tests/*.sh shared/scripts/agent/*.sh
+# all should show -rwxr-xr-x or similar
 ```
 
-The infrastructure smoke test suite (`run-infrastructure-tests.sh`) includes an execute-permission check for all cron scripts.
+The infrastructure smoke test suite (`shared/scripts/tests/test-infra.sh`) includes an execute-permission check for all cron scripts.
 
-**Resetting after a behavioral change:** When you edit an agent's `.md` files and need the agent to adopt the new behavior immediately (not wait for the next scheduled reset), use `reset-session.sh`:
+**Resetting after a behavioral change:** When you edit an agent's `.md` files and need the agent to adopt the new behavior immediately (not wait for the next scheduled reset), use `reset-agent.sh`:
 
 ```bash
-bash scripts/reset-session.sh <agent-id> --reason "Updated EMAIL.md rate limits"
+bash shared/scripts/ops/reset-agent.sh <agent-id> --reason "Updated EMAIL.md rate limits"
 ```
 
 The script archives all session files for the named agent, truncates them to zero, and logs the reset with the agent ID, timestamp, and reason to `shared/logs/sessions-reset.log`. This is the second step of the four-step behavioral change procedure (edit → reset → tell → verify); the reason log provides an audit trail of when and why each reset happened.
@@ -365,9 +366,9 @@ The script archives all session files for the named agent, truncates them to zer
 
 ```bash
 # Session management scripts (run via cron on host — see §5.5 for full crontab)
-*/5        * * * *  monitor-sessions.sh   # log .jsonl sizes; alert if growing large
-0  2,8,14,20 * * *  reset-sessions.sh     # archive >128KB sessions, truncate to zero
-                                           # 4x/day: 2am, 8am, 2pm, 8pm local
+*/5        * * * *  shared/scripts/cron/monitor-sessions.sh  # log .jsonl sizes
+0  2,8,14,20 * * *  shared/scripts/cron/reset-sessions.sh    # archive >128KB sessions, truncate to zero
+                                                               # 4x/day: 2am, 8am, 2pm, 8pm local
 */30       * * * *  seed-sessions.sh      # restore missing heartbeat session files
 ```
 
@@ -472,6 +473,16 @@ OpenClaw-Tutorial/               ← your private repo
 │   ├── secrets.yaml             # gitignored — API keys
 │   └── apply-config.sh
 ├── shared/                      ← runtime state shared across all agents
+│   ├── scripts/                 # infrastructure scripts (four categories)
+│   │   ├── cron/                # daemon scripts run automatically by cron
+│   │   │   # check-todos.sh, send-slack.sh, send-email.sh,
+│   │   │   # monitor-sessions.sh, seed-sessions.sh, reset-sessions.sh
+│   │   ├── ops/                 # operator tools — human runs interactively
+│   │   │   # reset-agent.sh
+│   │   ├── tests/               # test suite runners
+│   │   │   # test-all.sh, test-infra.sh
+│   │   └── agent/               # utilities called via exec: from agent sandboxes
+│   │       # scan-logs.sh, check-outbox-age.sh
 │   ├── email/                   # email review queue
 │   │   ├── outbox/ sent/ rejected/
 │   ├── slack/                   # Slack post queue and archive
@@ -862,7 +873,7 @@ The test channel and system owner email live in `config.yaml` so they can be cha
 **Notify pipeline + submission ramp** (chattpc26 / tpc26agent@gmail.com):
 
 ```bash
-scripts/run-chattpc26-tests.sh
+bash chattpc26/scripts/test-chattpc26.sh
 ```
 
 | Test | What it checks | External side effects |
@@ -884,7 +895,7 @@ Tests 1–4 cover the notify pipeline. Tests 5–11 cover the submission ramp ch
 **CeC-Admin agent** (cecat / cecatlett@gmail.com):
 
 ```bash
-scripts/run-cecat-tests.sh
+bash cecat/scripts/test-cecat.sh
 ```
 
 | Test | What it checks | External side effects |
@@ -900,27 +911,27 @@ Tests 1 and 2 exercise the two independent auth paths for Gmail — both must pa
 **Infrastructure**:
 
 ```bash
-scripts/run-infrastructure-tests.sh
+bash shared/scripts/tests/test-infra.sh
 ```
 
 | Test | What it checks | Why it matters |
 |------|---------------|----------------|
-| Test 1 | Execute permissions on all cron scripts | A missing execute bit causes silent nightly failures — today's outage root cause |
+| Test 1 | Execute permissions on all cron scripts | A missing execute bit causes silent nightly failures — no error is logged |
 | Test 2 | All expected cron entries present in crontab | Detects missing or accidentally-deleted cron jobs |
 | Test 3 | `openclaw-gateway` container is running | Prerequisite for all agent operation |
-| Test 4 | Gateway container is healthy (not restarting) | Detects crash-loop and config problems |
-| Test 5 | No session files above 128 KB threshold | Early warning that a reset failed or an agent (especially an email agent) is accumulating fast |
-| Test 6 | Heartbeat seed files (`main.jsonl`) present for all agents | Detects missing session files that cause silent heartbeat failures |
-| Test 7 | `check-todos.sh` runs without error | Scheduling engine health |
-| Test 8 | `monitor-sessions.sh` runs without error | Session monitoring health |
-| Test 9 | `seed-sessions.sh` runs without error (idempotent) | Session seed health |
-| Test 10 | All agents in openclaw.json registered in check-todos.sh TODO_FILES and CALENDAR_PAIRS | Catches silent registration gap — no error is raised, but calendar tasks never fire |
-| Test 11 | Gog keyring files present for all agent accounts | Token files not missing or zero-byte |
+| Test 4 | No session files above 512 KB | Early warning that a reset failed or an agent is accumulating session history fast |
+| Test 5 | Heartbeat seed files (`main.jsonl`) present for all agents | Missing files cause silent heartbeat failures |
+| Test 6 | `monitor-sessions.sh` runs without error | Session monitoring health |
+| Test 7 | `seed-sessions.sh` runs without error (idempotent) | Session seed health |
+| Test 8 | `check-todos.sh` runs without error | Scheduling engine health |
+| Test 9 | Gog keyring files present and non-empty for all agent accounts | Catches token files missing or zero-byte before a live failure |
+| Test 10 | All agents in openclaw.json registered in `check-todos.sh` | Silent registration gap — calendar tasks never fire, no error raised |
+| Test 11 | All `exec:` paths in runbooks resolve to existing files on host | Catches deployment gaps (scripts referenced but never created or moved) before they cause task failures at runtime |
 
 **Master suite** (runs all three suites and reports a combined summary):
 
 ```bash
-scripts/run-all-tests.sh
+bash shared/scripts/tests/test-all.sh
 ```
 
 ---
@@ -1326,10 +1337,17 @@ Students will:
 | `RUNBOOK_X.md` | `<agent>/runbooks/` | No — read at trigger | Step-by-step task procedures |
 | `config.yaml` | `gateway/` | N/A | Per-agent model assignments and Slack channel bindings |
 | `secrets.yaml` | `gateway/` | N/A | API keys (gitignored) |
-| `check-todos.sh` | `agents/scripts/` | N/A | Bash scheduling engine (cron); promotes READY entries; removes COMPLETED lines |
-| `send-approved-emails.sh` | `agents/scripts/` | N/A | Sends human-approved outbox emails |
-| `reset-sessions.sh` | `agents/scripts/` | N/A | Daily session archive and truncate (nightly cron) |
-| `reset-session.sh` | `agents/scripts/` | N/A | Manual single-agent session reset with reason logging (behavioral changes) |
+| `check-todos.sh` | `shared/scripts/cron/` | N/A | Bash scheduling engine (cron); promotes READY entries; removes COMPLETED lines |
+| `send-email.sh` | `shared/scripts/cron/` | N/A | Sends human-approved outbox emails (cron) |
+| `send-slack.sh` | `shared/scripts/cron/` | N/A | Drains Slack post outbox (cron) |
+| `reset-sessions.sh` | `shared/scripts/cron/` | N/A | Session archive and truncate, 4×/day (cron) |
+| `monitor-sessions.sh` | `shared/scripts/cron/` | N/A | Logs session file sizes (cron) |
+| `seed-sessions.sh` | `shared/scripts/cron/` | N/A | Ensures heartbeat seed files exist (cron) |
+| `reset-agent.sh` | `shared/scripts/ops/` | N/A | Manual single-agent session reset with reason logging (operator tool) |
+| `test-all.sh` | `shared/scripts/tests/` | N/A | Master test suite runner; calls all three agent suites |
+| `test-infra.sh` | `shared/scripts/tests/` | N/A | Infrastructure smoke tests (11 tests) |
+| `scan-logs.sh` | `shared/scripts/agent/` | N/A | Called via `exec:` by health report runbook; scans logs for errors |
+| `check-outbox-age.sh` | `shared/scripts/agent/` | N/A | Called via `exec:` by health report runbook; detects stale outbox items |
 
 ---
 
