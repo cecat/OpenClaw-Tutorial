@@ -428,7 +428,10 @@ OpenClaw stores per-agent model assignments inside `openclaw.json` — a large J
 Our solution: `config.yaml`, a small human-readable file that lives in the infrastructure repo alongside your other config. `apply-config.sh` reads it, patches `openclaw.json` in the container, and restarts the gateway. The source of truth for model assignments is `config.yaml`, not the raw JSON.  We expect that over time we will find other configuration details that would be handy to pull out into config.yaml for the same reason.
 
 ```yaml
-# Example of config.yaml — per-agent model assignments 
+# Example of config.yaml — per-agent model assignments and global defaults
+defaults:
+  fallback_model: vllm/Qwen/Qwen3-Coder-Next-FP8  # used if primary is unreachable
+
 agents:
   main:
     model: anthropic/claude-sonnet-4-6    # cloud API
@@ -525,6 +528,13 @@ OpenClaw stores its full runtime configuration in `openclaw.json` — a large JS
 
 ### E2.1 What config.yaml Manages
 
+**Global defaults** — settings that apply to all agents:
+```yaml
+defaults:
+  fallback_model: vllm/Qwen/Qwen3-Coder-Next-FP8
+```
+`fallback_model` is written to `agents.defaults.model.fallbacks` in `openclaw.json`. If the primary model for any agent is unreachable — connection refused, timeout, HTTP 5xx, rate limit, or a tunnel going down — OpenClaw automatically retries with the fallback. This keeps all agents working even during a cloud provider outage or a temporary network disruption. The fallback applies to every agent unless overridden per-agent.
+
 **Model assignments** — which LLM backs each agent:
 ```yaml
 agents:
@@ -546,6 +556,7 @@ channels:
     name: "#testing"
     agent: admin-agent
 ```
+`apply-config.sh` syncs two things in `openclaw.json` on every run: the `bindings[]` array (which agent handles a channel) and the `channels.slack.channels` allowlist (which channels deliver events to the gateway at all). Both must include a channel for it to work — OpenClaw silently drops events from channels not in the allowlist regardless of bindings. Managing them separately by hand is a common source of silent failures; `apply-config.sh` keeps them in sync automatically. Do not edit either list by hand.
 
 **API keys** — in `secrets.yaml` (gitignored, never committed):
 ```yaml
@@ -567,7 +578,7 @@ anthropic_api_key: sk-ant-...
 
 The value of this layer is that changes to running agent configuration take under 30 seconds and never require touching `docker-compose.yml`, restarting Docker stacks, or editing raw JSON. The barrier to experimenting with models and routing is essentially zero.
 
-We expect this pattern to grow. Other configuration values in `openclaw.json` — sandbox settings, heartbeat intervals, tool permissions — are also candidates for config.yaml abstraction. Any value that a deployer might want to change regularly and safely without dashboard access is a good candidate. The mechanism is established; the scope can expand.
+`config.yaml` currently manages four sections of `openclaw.json`: global defaults (including `fallback_model`), custom provider registration, per-agent model assignments, and Slack channel bindings (both `bindings[]` and the `channels.slack.channels` allowlist). We expect this pattern to grow. Other configuration values in `openclaw.json` — sandbox settings, heartbeat intervals, tool permissions — are also candidates for config.yaml abstraction. Any value that a deployer might want to change regularly and safely without dashboard access is a good candidate. The mechanism is established; the scope can expand.
 
 ---
 
@@ -1025,7 +1036,7 @@ Slack is connected to the **OpenClaw gateway** — not directly to individual ag
 - Register each Slack channel the bot should respond in (by channel ID) under `channels.slack.channels`. OpenClaw will ignore messages from unlisted channels.
 - Use `bindings` to route specific channels to specific agents. One agent is marked `"default": true` and handles all DMs and unrouted messages.
 
-**Channel routing in `config.yaml`** — Slack channel bindings are managed in `config.yaml` alongside model assignments, using the same `apply-config.sh` workflow. Each entry maps a Slack channel ID to an agent and includes a human-readable name for reference. `apply-config.sh` rebuilds the `bindings[]` array in `openclaw.json` from this list on every apply. The default agent (marked `"default": true` in `openclaw.json`) handles all DMs and any channel not explicitly listed — it does not need an entry. `CHANNELS.md` in the workspace provides a quick-reference table derived from this config; the authoritative source is `config.yaml`.
+**Channel routing in `config.yaml`** — Slack channel bindings are managed in `config.yaml` alongside model assignments, using the same `apply-config.sh` workflow. Each entry maps a Slack channel ID to an agent and includes a human-readable name for reference. `apply-config.sh` syncs two things on every run: the `bindings[]` array (which agent handles a channel) and the `channels.slack.channels` allowlist (which channels OpenClaw actually delivers events from). Both must include a channel for it to work — with `groupPolicy: "allowlist"`, OpenClaw silently drops events from channels not in the allowlist even if they appear in `bindings`. Do not edit either list directly; manage them through `config.yaml`. The default agent (marked `"default": true` in `openclaw.json`) handles all DMs and any channel not explicitly listed — it does not need an entry. `CHANNELS.md` in the workspace provides a quick-reference table derived from this config; the authoritative source is `config.yaml`.
 
 ```yaml
 # config.yaml — channel routing section

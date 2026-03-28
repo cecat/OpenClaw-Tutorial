@@ -90,8 +90,19 @@ The first launch runs a setup wizard that creates `openclaw.json` inside the
 
 ## Step 5 — Configure agents and apply settings
 
-Edit `config.yaml` to set your agent name and model. The default is one agent
-(`main`) using `anthropic/claude-sonnet-4-6`. Adjust to taste.
+Edit `config.yaml` to set your agent name, model, and optional fallback model.
+The default is one agent (`main`) using `anthropic/claude-sonnet-4-6`. Adjust to taste.
+
+```yaml
+defaults:
+  fallback_model: vllm/Qwen/Qwen3-Coder-Next-FP8  # retried if primary is unreachable
+
+agents:
+  main:
+    model: anthropic/claude-sonnet-4-6
+```
+
+`fallback_model` is optional but recommended: if the primary model is unreachable (tunnel down, provider outage, rate limit), OpenClaw automatically retries with this model. Set it to your local vLLM model so agents keep working without internet access.
 
 Apply the configuration (patches the live `openclaw.json` and restarts the gateway):
 

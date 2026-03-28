@@ -31,16 +31,18 @@ OpenClaw deployment. It is referenced from Module 8 of the tutorial outline.
 *(Step-by-step to be written)*
 
 1. Add tokens to `openclaw.json` under `channels.slack`
-2. Add channel IDs to the allowlist
-3. Configure `bindings` to route channels to specific agents
-4. Mark one agent as `"default": true` for DMs and unrouted messages
-5. Restart the gateway and verify connection
+2. Add channels to `config.yaml` — `apply-config.sh` automatically syncs both
+   `bindings[]` (which agent handles a channel) and `channels.slack.channels`
+   (the event delivery allowlist). Both must include a channel for it to work.
+   Do not edit either list by hand; let `apply-config.sh` manage them.
+3. Mark one agent as `"default": true` in `openclaw.json` for DMs and unrouted messages
+4. Run `python3 apply-config.sh` and verify the gateway restarts cleanly
 
 ## Part 3 — Update CHANNELS.md
 
 *(Step-by-step to be written)*
 
-Add entries to `CHANNELS.md` mapping each channel ID to its agent and purpose.
+`CHANNELS.md` is a quick-reference table in the agent workspace listing each channel, its ID, and its assigned agent. The authoritative source is `config.yaml` — after adding a channel there and running `apply-config.sh`, update `CHANNELS.md` to match. The agent uses `CHANNELS.md` to know where to direct Slack messages; keeping it in sync with `config.yaml` avoids routing confusion.
 
 ## Verification
 
