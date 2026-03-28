@@ -14,10 +14,34 @@
 #
 # Local vLLM (requires docker-compose.local.yml):
 #   vllm/<model-id>                 e.g. vllm/Qwen/Qwen3-Coder-Next-FP8
+#
+# Custom providers (defined in providers: section below):
+#   <provider-name>/<model-id>      e.g. argo/claude-sonnet-4-6
 
 agents:
   main:
     model: anthropic/claude-sonnet-4-6
+
+# ── Custom provider definitions ───────────────────────────────────────────────
+#
+# Define providers not natively supported by OpenClaw here. apply-config.sh
+# writes these into openclaw.json and reads the API key from secrets.yaml
+# using the key {provider_name}_api_key.
+#
+# Required per model: id, name, contextWindow, maxTokens
+# Defaults applied:   reasoning: false, input: [text], cost: all zeros
+#
+# Uncomment and fill in to add a custom provider:
+
+# providers:
+#   my-provider:
+#     baseUrl: "https://api.example.com/v1"
+#     api: "anthropic-messages"   # or openai-chat
+#     models:
+#       - id: my-model-id
+#         name: "My Model (provider)"
+#         contextWindow: 200000
+#         maxTokens: 16000
 
 # ── Slack channel → agent bindings ───────────────────────────────────────────
 #
