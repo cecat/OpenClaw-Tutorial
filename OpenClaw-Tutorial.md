@@ -23,6 +23,7 @@ C. Catlett (March 27, 2026)
 | Enhancement 3 | Scheduling: The Shell Owns the Clock |
 | Enhancement 4 | Separation of Responsibilities: Runbooks, Scripts, and Cron |
 | Enhancement 5 | Multi-layer Oversight: The Outbox and Review Pattern |
+| Enhancement 6 | Memory Indexing: Making OpenClaw Memory Reliable |
 | **Section 3: Integrations** | |
 | | Slack and Google |
 | **Appendix** | Lessons Learned |
@@ -50,9 +51,9 @@ C. Catlett (March 27, 2026)
 - This is genuinely useful. It is also qualitatively different from a chatbot, and must be designed accordingly.
 - OpenClaw agents can be partially autonomous without being fully autonomous — calibrating that balance deliberately is an important facet of this tutorial.
 
-### 1.3 Five Areas Where We Enhanced OpenClaw
+### 1.3 Six Areas Where We Enhanced OpenClaw
 
-OpenClaw provides the runtime and the channel integrations — but out of the box it makes no security decisions on your behalf, its scheduling is limited to a blunt periodic heartbeat, and its configuration lives in a large JSON file. We found five areas where deliberate design decisions significantly improve reliability, safety, and maintainability. These are covered in depth in Section 2 — here is the brief version.
+OpenClaw provides the runtime and the channel integrations — but out of the box it makes no security decisions on your behalf, its scheduling is limited to a blunt periodic heartbeat, and its configuration lives in a large JSON file. We found six areas where deliberate design decisions significantly improve reliability, safety, and maintainability. These are covered in depth in Section 2 — here is the brief version.
 
 **Security, safety, and containment.** OpenClaw can be deployed and run without any of the network isolation, sandboxing, or behavioral guardrails we describe. The platform does not enforce them by default. We chose to implement them deliberately, drawing on a documented threat model — and real-world incidents in the OpenClaw ecosystem — that make the case for treating security as a design consideration from day one, not a retrofit. *(Section 2, Enhancement 1)*
 
@@ -63,6 +64,8 @@ OpenClaw provides the runtime and the channel integrations — but out of the bo
 **Layered oversight.** Any agent action with real-world consequences — sending email, posting to a channel, modifying external records — should go through a review step before execution. We implement this via an outbox/approval/send pattern: the agent queues a draft, a reviewer (another agent or a human) approves or rejects, and a deterministic cron script sends approved items. The goal is to start with review enabled everywhere and progressively delegate that review as confidence in agent behavior grows. *(Section 2, Enhancement 5)*
 
 **Configuration scaffolding.** OpenClaw stores its full configuration — agent model assignments, Slack channel bindings, sandbox settings, and more — in a single large JSON file (`openclaw.json`) inside the running container. Editing it directly through the dashboard's small JSON editor is error-prone and tedious. We built `config.yaml` and `apply-config.sh` as a clean abstraction: human-readable YAML captures the assignments you care about, a script patches the live JSON and restarts the gateway. We expect this list of managed settings to grow over time as we find other configuration values worth exposing this way. *(Section 2, Enhancement 2)*
+
+**Memory indexing.** OpenClaw provides memory tools (`memory_search`, `memory_get`) and auto-loads the last two days of daily memory files — but it does not call these tools automatically before agent responses. An agent that has not been explicitly instructed to search its memory will not do so. We close this gap with two `SOUL.md` rules (search-before-saying-I-don't-know; index every briefing) and a lightweight `MEMORY.md` indexing discipline: one summary line per memory file, with critical facts inline. This makes memory useful in practice rather than in principle. *(Section 2, Enhancement 6)*
 
 ### 1.4 Safety as a Design Principle
 - Security and containment have historically been afterthoughts with exciting new technology — something addressed after adoption, once incidents accumulate, rather than before. OpenClaw is no exception to this pattern. The platform is powerful, the demos are compelling, and the natural instinct is to get something running and worry about hardening later. Rapid adoption amplifies this risk: Jensen Huang remarked at GTC in March 2026 that OpenClaw is the fastest-adopted open source project of all time. [*verify and cite*] The faster a platform spreads, the faster it becomes a target.
@@ -371,6 +374,60 @@ The script archives all session files for the named agent, truncates them to zer
                                                                # 4x/day: 2am, 8am, 2pm, 8pm local
 */30       * * * *  seed-sessions.sh      # restore missing heartbeat session files
 ```
+
+---
+
+### 3.7 How OpenClaw Memory Actually Works — and How to Make It Useful
+
+*Sources: [OpenClaw Memory documentation](https://docs.openclaw.ai/concepts/memory), [OpenClaw Agent Workspace](https://docs.openclaw.ai/concepts/agent-workspace), [OpenClaw Memory Masterclass](https://velvetshark.com/openclaw-memory-masterclass), [How OpenClaw memory works](https://lumadock.com/tutorials/openclaw-memory-explained)*
+
+This section documents OpenClaw's native memory mechanics more precisely than the above overview implies — including two behaviors that are easy to misunderstand and that cause real operational failures if missed.
+
+#### The two built-in memory tools
+
+OpenClaw provides two agent-facing tools registered automatically when memory search is enabled:
+
+- **`memory_search`** — semantic search (hybrid BM25 + vector) over all indexed memory content: `MEMORY.md` plus every `memory/YYYY-MM-DD.md` file. Returns snippet text, file path, line range, and relevance score.
+- **`memory_get`** — targeted read of a specific memory file, optionally from a line offset for N lines. Degrades gracefully when a file doesn't exist yet (e.g., today's daily log before its first write).
+
+Both are agent-initiated — OpenClaw does not call them automatically before responses. **The agent must decide to call them.** This is the central operational fact: an agent that has not been explicitly instructed to search its memory before saying "I don't know" will not do so.
+
+#### Daily memory files: what OpenClaw does automatically
+
+OpenClaw creates `memory/YYYY-MM-DD.md` each day automatically. At session start, **today's and yesterday's daily logs are loaded into context automatically** — they do not require an explicit `memory_get` call. Content from earlier days requires either `memory_search` (semantic) or an explicit `memory_get` call.
+
+The practical implication: a briefing written to `memory/2026-03-28.md` is automatically available in sessions that start on 2026-03-28 or 2026-03-29. On 2026-03-30 and beyond, the agent must call `memory_search` to find it — or the content must have been promoted to `MEMORY.md`.
+
+#### Critical: MEMORY.md does not load in group/channel contexts
+
+`MEMORY.md` is part of the Sacred Eight and auto-loads on every inference call — **but only in private (1:1) sessions**. In group channel contexts (a Slack channel, not a DM), `MEMORY.md` is not injected. This means an agent answering a question in a Slack channel does not have `MEMORY.md` in context unless it explicitly calls `memory_get` to read it.
+
+This has a significant implication for how you store facts that must be available in channel sessions:
+
+| Where stored | Available in private session? | Available in channel session? |
+|---|---|---|
+| `MEMORY.md` | Yes (auto-loaded) | **No** — must call `memory_get` explicitly |
+| `memory/YYYY-MM-DD.md` (today/yesterday) | Yes (auto-loaded) | Yes (auto-loaded) |
+| `memory/YYYY-MM-DD.md` (older) | Only via `memory_search` | Only via `memory_search` |
+| `IDENTITY.md` or `USER.md` | Yes (Sacred Eight) | Yes (Sacred Eight) |
+
+**The practical takeaway:** For facts that must be reliably available in channel contexts — event schedules, standing commitments, project-specific context — `IDENTITY.md` or `USER.md` are more reliable homes than `MEMORY.md`. Both are in the Sacred Eight and load unconditionally in all contexts.
+
+#### Making memory useful: two rules that must be in SOUL.md
+
+Because memory lookup is entirely agent-initiated, the agent will not use it unless explicitly instructed to. Two rules belong in every agent's `SOUL.md`:
+
+**Rule 1 — Search before saying you don't know:**
+> "Before responding that information is unknown, call `memory_search` with relevant keywords. Do not say 'I don't know' until memory has been searched."
+
+**Rule 2 — Promote during briefings:**
+> "When given a briefing containing dates, schedules, commitments, or event details, write the key facts to `MEMORY.md` before the session ends. For facts that must be available in channel (non-DM) sessions, also add them to the relevant section of `IDENTITY.md`."
+
+Without Rule 1, the agent has memory it never uses. Without Rule 2, important facts stay in daily files that age out of automatic loading within two days. Both rules together close the loop.
+
+#### The session-reset interaction
+
+Our `reset-sessions.sh` runs four times daily and truncates session files above 128 KB. After a reset, the agent starts fresh from the Sacred Eight files plus today's and yesterday's daily memory. This makes the daily memory auto-load window critical: any fact that needs to survive beyond two days must be promoted to `MEMORY.md` or `IDENTITY.md` before the daily file ages out. A briefing received on Monday that is not promoted will be inaccessible (without an explicit `memory_search` call) by Wednesday.
 
 ---
 
@@ -1021,6 +1078,89 @@ The deterministic send script and the append-only audit log are always present. 
 
 ---
 
+## Enhancement 6 — Memory Indexing: Making OpenClaw Memory Reliable
+
+OpenClaw's memory system provides the tools for agents to remember and retrieve information across sessions. But out of the box, the tools are available without instructions for *when* to use them — and agents do not use tools they are not explicitly told to use. The result: an agent that has been briefed, that has written notes to its daily memory file, that has memory search fully operational — and that will say "I don't know" in response to a question about something it was directly told.
+
+This enhancement describes two small additions that close that gap.
+
+### E6.1 What OpenClaw Provides (and What It Doesn't)
+
+OpenClaw provides two memory tools:
+- **`memory_search`** — semantic search over all indexed memory: `MEMORY.md` plus all `memory/YYYY-MM-DD.md` files
+- **`memory_get`** — targeted read of a named memory file
+
+Both are agent-initiated. OpenClaw does not call them automatically before agent responses. The agent must decide to call them — and it will not decide to do so unless instructed.
+
+Additionally, `MEMORY.md` — one of the Sacred Eight files auto-loaded on every inference call — loads **only in private (DM) sessions**. In group Slack channel contexts, `MEMORY.md` is not injected. An agent answering a channel message has no access to `MEMORY.md` content unless it explicitly calls `memory_get`.
+
+This means: a fact written to `MEMORY.md` after a briefing is available in the next DM session, but **not** in the next channel session, without an explicit `memory_get` call the agent has no reason to make.
+
+*(See §3.7 for the full mechanics of what OpenClaw loads automatically versus what requires explicit tool calls.)*
+
+### E6.2 The Two-Part Fix
+
+**Part 1 — Two rules in every agent's `SOUL.md`:**
+
+```markdown
+## Memory
+
+- Before responding that information is unknown, call `memory_search` with
+  relevant keywords. Follow up with `memory_get` if a relevant file is
+  referenced in the results. Do not say "I don't know" until memory has
+  been searched.
+
+- When given a briefing, write key facts to memory/YYYY-MM-DD.md and add
+  a one-line index entry to MEMORY.md (format below). For facts involving
+  events, schedules, or commitments within the next 60 days, also add
+  a summary entry to IDENTITY.md (under "Upcoming Events" or equivalent)
+  so the facts are available in channel sessions without requiring an
+  explicit memory_get call.
+```
+
+Rule 1 turns memory lookup from an optional behavior into a required one. Rule 2 ensures briefings don't silently age out of automatic loading.
+
+**Part 2 — A lightweight indexing discipline for `MEMORY.md`:**
+
+Rather than promoting full content to `MEMORY.md` (which would make it unwieldy), each briefing gets one summary line:
+
+```
+- [YYYY-MM-DD] <topic>: <critical facts inline> — details in memory/YYYY-MM-DD.md
+```
+
+Example:
+```
+- [2026-03-28] Bologna Hackathon: Day 0 Mar 31 Zoom 8–11am CT; Day 1 Apr 7 Zoom 8–11am CT — details in memory/2026-03-28.md
+```
+
+This keeps `MEMORY.md` as a lean, scannable index. The one-line format includes the most critical facts inline so `memory_search` can find them without requiring a follow-on `memory_get`. The referenced daily file contains the full briefing.
+
+When an event or commitment passes, prune the `MEMORY.md` index entry (and the corresponding `IDENTITY.md` entry if one was added). This prevents `MEMORY.md` from accumulating stale history.
+
+### E6.3 Why IDENTITY.md for Channel-Accessible Facts
+
+`IDENTITY.md` is in the Sacred Eight and loads unconditionally in all contexts — DMs, group channels, heartbeat sessions. `MEMORY.md` does not. For any fact that an agent may need to reference in a channel session (event schedules, standing commitments, project-specific context), `IDENTITY.md` is the reliable home.
+
+The pattern:
+- **`MEMORY.md` index entry** → available in DM sessions; findable via `memory_search` in any session; not auto-available in channel sessions
+- **`IDENTITY.md` entry** → available in all sessions without any explicit tool call
+- **`memory/YYYY-MM-DD.md` full briefing** → available for two days automatically; after that, requires `memory_search` to surface
+
+For a time-bounded event (a conference, a hackathon, a deadline), add the schedule summary to both `MEMORY.md` (for searchability) and `IDENTITY.md` (for channel accessibility). Remove both entries after the event passes.
+
+### E6.4 Applying This Enhancement
+
+For each agent in your deployment:
+
+1. Add a `## Memory` section to `SOUL.md` with the two rules from §E6.2
+2. Add a `## Memory Tools` section to `TOOLS.md` documenting `memory_search` and `memory_get` and the indexing format
+3. Reset the agent's session so the new `SOUL.md` rules are in effect from the next heartbeat
+4. After the reset, send a one-time message to the agent in Slack explicitly stating the new behavior (per the four-step behavioral change procedure: edit → reset → tell → verify)
+
+After this enhancement is in place, any briefing you give an agent should end with an explicit instruction to write a memory file and index it. The `SOUL.md` rule creates the standing instruction; the explicit reminder at briefing time reinforces it for each specific case.
+
+---
+
 
 
 ---
@@ -1287,6 +1427,39 @@ The fix — two-pass triage:
 This is not just about email. The same principle applies to any agent that reads large external data sources — log files, document stores, database query results. The design question is: what is the minimum information the LLM actually needs to reason about this item? Fetch only that. Structured outputs (classifications, action items) are small; they should replace the raw input in the context rather than supplement it.
 
 The general rule of thumb: if your agent reads N items per heartbeat, the per-item data volume should be at most a few hundred tokens per item, not thousands. Budget your external data fetches the same way you budget your runbook steps — not with how much you *could* read, but with how little you actually need.
+
+---
+
+**Lesson 12: Memory files are useless unless agents are explicitly told to use them**
+
+The general principle: OpenClaw's memory system stores and indexes information reliably, but retrieval is entirely agent-initiated. OpenClaw does not call `memory_search` before generating a response. An agent that has not been given explicit standing instructions to search its memory will not do so — even if the answer to the user's question is sitting in a memory file the agent itself wrote.
+
+How it manifests:
+- You brief an agent on an upcoming event. The agent writes a memory file (`memory/2026-03-28.md`) with full details. Two days later, in a Slack channel conversation, you ask about the event schedule. The agent says "I don't know" — not because the information was lost, but because the agent never called `memory_search` and `MEMORY.md` doesn't load in channel sessions.
+- An agent is briefed on a new contact, project context, or policy change. The briefing is written to the daily memory file. After two days, when that file ages out of automatic loading, the agent behaves as if the briefing never happened. The information is still in the memory index — findable via `memory_search` — but the agent never searches.
+- The failure is invisible. There is no error. The agent doesn't say "I couldn't find anything." It simply answers from its base training, as if the briefing never occurred.
+
+The root cause is two interacting behaviors:
+1. `memory_search` and `memory_get` are agent-initiated only — no implicit lookup happens
+2. `MEMORY.md` (where agents would naturally store promoted facts) does not load in Slack channel contexts, only in DMs
+
+The fix — two parts:
+
+**Part 1 — Two rules in `SOUL.md`:**
+
+Add an explicit `## Memory` section requiring the agent to (a) call `memory_search` before saying "I don't know," and (b) index every briefing with a one-line entry in `MEMORY.md` plus a dated memory file. The standing instruction turns memory lookup from an optional behavior into a required one.
+
+**Part 2 — One-line index entries in `MEMORY.md`:**
+
+For each briefing or important fact, write one summary line to `MEMORY.md`:
+```
+- [YYYY-MM-DD] <topic>: <critical facts inline> — details in memory/YYYY-MM-DD.md
+```
+For facts that must be available in channel sessions (event schedules, commitments), also add a summary entry to `IDENTITY.md`, which is in the Sacred Eight and loads unconditionally in all contexts. After the event passes, prune both entries.
+
+The practical discipline: any time you brief an agent on something important, explicitly close the briefing by asking the agent to write the memory file and add the index entry. The `SOUL.md` rule creates the standing requirement; the explicit reminder at briefing time reinforces it for the specific content. Don't assume the agent will do it without prompting — verify.
+
+*(Enhancement 6 covers the full implementation and the channel-vs-DM loading table.)*
 
 ---
 
