@@ -114,6 +114,20 @@ python3 apply-config.sh
 If the gateway crash-loops after applying config, the script detects it and prints
 the error. Fix the config and re-run.
 
+> **Important:** OpenClaw's live configuration lives inside the `openclaw-config`
+> Docker volume, not in the repo files you cloned. `apply-config.sh` is the only
+> reliable way to update a running gateway — editing repo files alone has no effect.
+
+After applying, confirm the gateway picked up the new settings:
+
+```bash
+curl -s http://<your-tailscale-ip>:18789/health
+docker logs openclaw-gateway --tail 20
+```
+
+Look for your model name in the startup log lines. If the old model still appears,
+the config patch did not take effect — re-run `apply-config.sh` and check for errors.
+
 ---
 
 ## Step 6 — Create your first agent workspace
@@ -181,6 +195,35 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
 Set `model: vllm/<your-model-id>` in `config.yaml` and re-run `apply-config.sh`.
 The `VLLM_NETWORK` variable in `.env` must match the Docker network created by
 your vLLM docker-compose (`<compose-dir>_nim_net`).
+
+**Finding the right model identifier.** The model string OpenClaw expects may not
+match what you see in the vLLM registry UI. The registry may show a display name like
+`argo:gpt-5.4` while the `internal_name` used by the API is `gpt54` — and OpenClaw
+needs the latter, formatted as `argo/gpt54`. To find the correct string, query the
+vLLM models endpoint directly from inside the gateway container:
+
+```bash
+docker compose --profile cli run --rm openclaw-cli \
+  curl -s http://nim:8000/v1/models | python3 -m json.tool
+```
+
+Look for the `id` field in each model object — that is the value to use after `vllm/`
+in `config.yaml`.
+
+**Verify the model works before wiring it up.** The docs can't establish that a
+given model is reachable and functional on your specific machine — only a real
+inference call can. Before applying the config, confirm the endpoint responds:
+
+```bash
+docker compose --profile cli run --rm openclaw-cli \
+  curl -s http://nim:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{"model": "<your-model-id>", "messages": [{"role":"user","content":"hi"}], "max_tokens": 10}'
+```
+
+A valid JSON response with a `choices` array means the model is reachable. An
+error or timeout here means the problem is in your vLLM setup, not OpenClaw — fix
+it before proceeding.
 
 ---
 
