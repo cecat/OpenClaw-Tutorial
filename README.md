@@ -6,7 +6,7 @@ The repo is organized as a tutorial, which covers the big picture, our objective
 
 ## Contents of this Repo
 
-- [Tutorial](https://github.com/cecat/OpenClaw-Tutorial/blob/main/OpenClaw-Tutorial-Outline.md) - a very long overview of OpenClaw and the scaffolding we've built. For our purposes and objectives, we found it useful to deveoop a handful of *Enhancements*, each addressing something we needed OpenClaw (or one or more claws) to be able to do.  We also discovered some rabbit holes that we had to climb out of, and kept track of these in a *Lessons Learned* appendix.
+- [Tutorial](https://github.com/cecat/OpenClaw-Tutorial/blob/main/OpenClaw-Tutorial.md) - a very long overview of OpenClaw and the scaffolding we've built. For our purposes and objectives, we found it useful to deveoop a handful of *Enhancements*, each addressing something we needed OpenClaw (or one or more claws) to be able to do.  We also discovered some rabbit holes that we had to climb out of, and kept track of these in a *Lessons Learned* appendix.
 
 - [Quickstart](https://github.com/cecat/OpenClaw-Tutorial/blob/main/Quickstart.md) -  This was prepared using a DGX-Spark (Ubuntu), so is by no means a robust quickstart, but is here in case you are eager to dive in.  Please do give us feedback.
 
