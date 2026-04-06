@@ -14,7 +14,7 @@ Configuration verified against live `openclaw.json` and `exec-approvals.json` re
 
 | Item | Value |
 |------|-------|
-| Agents | main (argo/claude-4.6-sonnet), cecat (argo/claude-4.6-opus), chattpc26 (argo/claude-4.6-haiku) |
+| Agents | luoji (argo/claude-4.6-sonnet), cecat (argo/claude-4.6-opus), chattpc26 (argo/claude-4.6-haiku) |
 | Sandbox | `mode: all`, `workspaceAccess: rw`, `dangerouslyAllowExternalBindSources: true` on all agents |
 | Channel | Slack only, Socket Mode, `streaming: false`, `groupPolicy: allowlist` |
 | Gateway | `mode: local`, `bind: lan`, `auth.mode: token`, `allowTailscale: true` |
