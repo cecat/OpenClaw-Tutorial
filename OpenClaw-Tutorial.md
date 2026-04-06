@@ -1200,7 +1200,13 @@ channels:
     agent: admin-agent
 ```
 
-**The outbound post problem:** Agents can reply within active Slack sessions. They cannot initiate a post when no session is active (e.g., a scheduled overnight report). The slack-outbox pattern handles this: the agent writes JSON to `shared/slack/outbox/` and `send-slack-posts.sh` (cron, every 5 minutes) posts via the Slack `chat.postMessage` API and archives to `slack/sent/`.
+**The outbound post problem — `sessions_send` vs. the outbox:** Agents can reply within active Slack sessions using `sessions_send`. What `sessions_send` *cannot* do is post to a *different* channel than the one currently open, or initiate any post when no session is active at all (e.g., a scheduled overnight report or a heartbeat-triggered task). An agent in `#agent-luoji` that tries to `sessions_send` to `#claws` will silently fail — the sandbox constrains it to the current session. The failure mode is not an error; the agent will attempt the send, receive no rejection, and believe it succeeded. Nothing appears in the target channel.
+
+The slack-outbox pattern handles all proactive posting correctly: the agent writes a JSON file to `/shared/slack/outbox/` with the target channel ID and message text; `send-slack-posts.sh` (cron, every 5 minutes) calls Slack's `chat.postMessage` API and archives to `slack/sent/`. For DMs to a user, use the user's Slack ID as the `channel` value — the Slack API accepts user IDs for direct messages. The rule is: use `sessions_send` only for direct replies in the conversation currently open; use the outbox for everything else.
+
+For this to work, agents must know their channel IDs. List all channels an agent may ever need to post to in its `PATHS.md`. Without a channel ID reference, agents will fall back to `sessions_send` and silently fail to reach other channels. Provide a `RUNBOOK_SLACK_POST.md` in `runbooks/` with the outbox JSON pattern — agents following a HEARTBEAT.md `SLACK_POST` task need the exact format, not a description of it.
+
+**Inter-agent messaging:** OpenClaw agents cannot DM each other via Slack's bot DM mechanism. To have one agent reach another, post via the outbox to a channel that the target agent monitors — either a shared channel bound to both agents in `config.yaml` (e.g., a `#claws` channel), or the target agent's own dedicated channel. With ACP dispatch disabled (the recommended conservative setting), this Slack-mediated channel post is the only inter-agent communication path.
 
 ### I.2 Credential Handling for External Services
 
@@ -1463,6 +1469,29 @@ The practical discipline: any time you brief an agent on something important, ex
 
 ---
 
+**Lesson 13: `sessions_send` only works in the current session — use the outbox for all proactive Slack posts**
+
+The general principle: agents that use `sessions_send` to post to a Slack channel other than the one they are currently in a session with will silently fail. There is no error message. The agent believes it posted. The channel receives nothing. This failure mode is particularly dangerous because it also applies to scheduled tasks: a heartbeat-triggered `SLACK_POST` entry in `TODO.md` silently no-ops on every execution, is marked COMPLETED, and the intended recipients are never reached.
+
+How it manifests:
+- You ask an agent in `#agent-luoji` to post a message to `#claws`. It calls `sessions_send` targeting `#claws`. Nothing appears. The agent reports success.
+- An agent's `HEARTBEAT.md` says to handle `SLACK_POST | <channel_id> | <message>` READY tasks `via sessions_send`. Every such task silently fails — the heartbeat session has no user, and `sessions_send` has no valid target to route to.
+- An agent is briefed on a shared channel it should be able to reach. You give it the channel ID. It tries `sessions_send`. Nothing arrives. The agent concludes it was blocked or the channel ID was wrong — but neither is true.
+
+Why it happens: `sessions_send` is a reply mechanism, not an outbound posting API. It routes a message back to whoever is currently in the open session. In a heartbeat (no user session), when targeting a different channel, or when addressing a Slack app bot, there is no valid session target — the send is silently discarded.
+
+The fix — three parts required together:
+
+**1. `PATHS.md`:** List every Slack channel ID the agent may need to post to, alongside its human-readable name. Without this, agents have no reliable reference and no way to select the right target for a given audience.
+
+**2. `HEARTBEAT.md`:** In the `SLACK_DM` and `SLACK_POST` READY task rows, replace `via sessions_send` with `write to Slack outbox — see runbooks/RUNBOOK_SLACK_POST.md`. Reserve `sessions_send` for direct replies only.
+
+**3. `RUNBOOK_SLACK_POST.md`:** Add a runbook in each agent's `runbooks/` directory with the outbox JSON pattern. Describing it in prose is not enough — agents executing a READY task follow a recipe, not a description. The runbook must contain the exact `exec: python3 -c "..."` block with the correct fields (`channel`, `text`, `requested_by`, `requested_at`, `status: "pending"`).
+
+The correct division of labor: `sessions_send` for replies in the current conversation; outbox for everything else — cross-channel posts, DMs to users not in the current session, inter-agent messages, and all scheduled/heartbeat-triggered Slack output.
+
+---
+
 ## What's Next: The Hands-On Lab
 
 The hands-on session (developed separately as its own document in this repository) uses the materials in this repo directly — no external clones required. The tutorial repo will be organized as:
@@ -1508,6 +1537,7 @@ Students will:
 | `CALENDAR.md` | `<agent>/` | No — read by bash | Recurring duty schedule |
 | `TODO.md` | `<agent>/` | No — read by agent | One-shot deferred tasks |
 | `RUNBOOK_X.md` | `<agent>/runbooks/` | No — read at trigger | Step-by-step task procedures |
+| `RUNBOOK_SLACK_POST.md` | `<agent>/runbooks/` | No — read at trigger | Slack outbox posting pattern; required for cross-channel posts and DMs (see Lesson 13) |
 | `config.yaml` | `gateway/` | N/A | Per-agent model assignments and Slack channel bindings |
 | `secrets.yaml` | `gateway/` | N/A | API keys (gitignored) |
 | `check-todos.sh` | `shared/scripts/cron/` | N/A | Bash scheduling engine (cron); promotes READY entries; removes COMPLETED lines |
@@ -1524,7 +1554,7 @@ Students will:
 
 ---
 
-*Outline version: 2026-03-20 rev 14 — E5.1 updated: to_name/Google Contacts name-resolution pattern documented; EMAIL.md updated to match.*
+*Outline version: 2026-04-06 rev 15 — I.1 Slack: expanded outbound post problem with sessions_send vs. outbox distinction and inter-agent messaging; Lesson 13 added: sessions_send failure mode and three-part fix; Key Files: RUNBOOK_SLACK_POST.md added.*
 
 ---
 
