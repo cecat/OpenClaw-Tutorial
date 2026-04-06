@@ -12,8 +12,11 @@ If you just want to get something up and going you may wish to start with the
 [Quickstart](https://github.com/cecat/OpenClaw-Tutorial/blob/main/Quickstart.md).
 This is a WIP so please provide feedback (especially if you run into a snag).
 
-C. Catlett (March 27, 2026)
+C. Catlett (March 2026)
 
+---
+
+Section 1 provides background on OpenClaw and information about agent (claw) configuration, which you can find in many places ([OpenClaw.ai](https://openclaw.ai) for starters!).  Our design charter captures our specific objectives, which in turn drove the development of some scaffolding necessary to add functionality and/or to make it easier to work with the system (e.g., config tools). These are covered in Section 2.  Section 3 documents how we connect with Google and Slack.  Throughout the process we documented things that tripped us up and how we recovered, placing them as a set of lessons learned in the Appendix.
 
 ## Contents
 
