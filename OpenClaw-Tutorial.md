@@ -16,7 +16,13 @@ C. Catlett (March 2026)
 
 ---
 
-Section 1 provides background on OpenClaw and information about agent (claw) configuration, which you can find in many places ([OpenClaw.ai](https://openclaw.ai) for starters!).  Our design charter captures our specific objectives, which in turn drove the development of some scaffolding necessary to add functionality and/or to make it easier to work with the system (e.g., config tools). These are covered in Section 2.  Section 3 documents how we connect with Google and Slack.  Throughout the process we documented things that tripped us up and how we recovered, placing them as a set of lessons learned in the Appendix.
+**Section 1:** Background on OpenClaw and information about agent (claw) configuration, which you can find in many places ([OpenClaw.ai](https://openclaw.ai) for starters!). Before describing what we did, here we document the principles and goals we had for OpenClaw--the *Design Charter*.
+
+**Section 2:** Our design charter captures our specific objectives, which in turn drove the development of some scaffolding necessary to add functionality and/or to make it easier to work with the system (e.g., config tools). In this section we detail six system enhancements we created.
+
+**Section 3:** The first two things we needed were to work with the Google suite and use Slack for messaging to ourselves and many others.
+
+**Apendix:** Throughout the design, deploiyment, test, day-to-day use, and re-design (improve, simplify, streamline, etc.)  processes we documented things that tripped us up and how we recovered, placing them as a set of lessons learned in the Appendix.
 
 ## Contents
 
