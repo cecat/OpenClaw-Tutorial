@@ -1,6 +1,6 @@
 # OpenClaw-Tutorial - WIP
 
-Eventually this will evolve into a tutorial (both lecture and hands-on) on getting started with OpenClaw. 
+This project deploys OpenClaw with a focus on (a) safety, security, and alignment, (b) reliability and predictability, and (c) flexible system management.
 
 ## Contents of this Repo
 

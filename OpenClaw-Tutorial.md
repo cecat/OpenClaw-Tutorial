@@ -1,8 +1,14 @@
-# Getting Started with OpenClaw: A Safety-First Approach
+# Getting Started with OpenClaw (focusing on safety, alignment, reliability, and ease-of-use)
 
-This is rather long, but we had to build quite a bit of scaffolding around OpenClaw
-to get functionality that we wanted for more reliable agents doing procedural things,
-scheduling tasks, etc.  You may wish to start with the 
+This project deploys OpenClaw with a focus on (a) safety, security, and alignment, (b) reliability and predictability, and (c) flexible system management.
+
+We have deployed OpenClaw with a handful of claws, each having differnet duties and thus different
+capabilities.   In the process, we discovered gaps between what we wanted claws to do and some 
+combination of challenges realted to LLM skills, OpenClaw features, and/or system setup (e.g.,
+guardrails such as Tailscale to limit exposure or use of cronjobs run by system processes rather
+than granting more freedom to claws.
+
+If you just want to get something up and going you may wish to start with the 
 [Quickstart](https://github.com/cecat/OpenClaw-Tutorial/blob/main/Quickstart.md).
 This is a WIP so please provide feedback (especially if you run into a snag).
 
@@ -34,7 +40,7 @@ C. Catlett (March 27, 2026)
 
 # SECTION 1: OpenClaw
 
-*This section introduces OpenClaw — what it is, the design principles that guide our deployment, and how agents are configured and maintained.*
+*This section introduces OpenClaw — what it is, the design principles that guide our deployment, and how (claws) agents are configured and maintained.*
 
 ## Module 1 — What Is OpenClaw and Why This Approach?
 
