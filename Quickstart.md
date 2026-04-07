@@ -84,16 +84,14 @@ From any device on your Tailscale network:
 http://<your-tailscale-ip>:18789
 ```
 
-The first launch runs a setup wizard (about 5 minutes) that creates `openclaw.json` inside the `openclaw-config` Docker volume. It walks through gateway and agent basics — complete it before running `apply-config.sh`. Have the following ready:
+The first launch runs OpenClaw's built-in setup wizard, which creates `openclaw.json` inside the `openclaw-config` Docker volume. The wizard takes about 5 minutes — it will ask you to choose a model provider, enter an API key, and optionally configure a messaging channel (Slack, Telegram, etc.). Have the following ready:
 
-| Item | Where to get it | Required |
-|------|----------------|---------|
-| Your Tailscale IP | `tailscale ip -4` | Yes |
-| Agent workspace path | The directory you created in Step 1 | Yes |
-| Anthropic API key (`sk-ant-...`) | console.anthropic.com | Yes (unless using vLLM only) |
-| Slack bot token (`xoxb-...`) and app token (`xapp-...`) | api.slack.com/apps | Only if adding Slack now |
+| Item | Where to get it | Notes |
+|------|----------------|-------|
+| Anthropic API key (`sk-ant-...`) | console.anthropic.com | Or key for whichever provider you choose |
+| Slack bot token (`xoxb-...`) and app token (`xapp-...`) | api.slack.com/apps | Optional — can skip and add later |
 
-Slack tokens can be skipped here and added later.  This lets you get the gateway going before tackling [Integrations](Integrations/Slack-Integration.md)).
+Skip the Slack step if you don't have tokens yet — it's easier to get the gateway running first and add Slack as a second step (see [Integrations/Slack-Integration.md](Integrations/Slack-Integration.md)). If the wizard also asks about a web search provider, skip it — that is managed via `config.yaml` and `apply-config.sh` in Step 5.
 
 OpenClaw's dashboard allows you to edit `openclaw.json` if you enjoy working with huge json files in a small window.  We've created a more convenient scheme that allows you to specify (and eassily update) several config settings in
 `config.yaml`.  Afte updating `config.yaml` you run the script  `apply-config.sh` to update openclaw.json in the running gateway. 
