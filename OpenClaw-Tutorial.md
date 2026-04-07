@@ -1184,13 +1184,13 @@ After this enhancement is in place, any briefing you give an agent should end wi
 
 *Good starting points for connecting external services.*
 
-## Integrations: Slack and Google
+## Integrations: Slack, Google, and Web Tools
 
 ### I.1 Slack
 
 Slack is connected to the **OpenClaw gateway** — not directly to individual agents. The gateway receives all incoming Slack messages and routes them to the appropriate agent based on channel or DM. The agents never interact with Slack directly; everything flows through the gateway and `openclaw.json` configuration.
 
-*(Full step-by-step setup is in `Integrations/Slack-Integration.md` in this repository. The following is an overview sufficient for slide-level discussion.)*
+*(Full step-by-step setup is in [`Integrations/Slack-Integration.md`](Integrations/Slack-Integration.md) in this repository. The following is an overview sufficient for slide-level discussion.)*
 
 **On the Slack side** — three things to configure at api.slack.com/apps:
 - Create a Slack app with Socket Mode enabled. Socket Mode lets OpenClaw receive events over a persistent WebSocket rather than requiring a public inbound URL.
@@ -1233,7 +1233,7 @@ Any integration that requires authentication — Google, Slack, or other service
 
 The key question when setting up a new credential mount: *who refreshes the token?* If the host script refreshes it, use `:ro`. If the sandbox refreshes it, use `:rw` — but audit carefully, since a writable credential mount is a higher-risk surface.
 
-This applies identically to Google OAuth tokens, Slack bot tokens stored on disk, or any other credential file. Each integration section below notes its specific mount requirements. *(See `Integrations/Google-Integration.md` and `Integrations/Slack-Integration.md` in this repository for full setup detail.)*
+This applies identically to Google OAuth tokens, Slack bot tokens stored on disk, or any other credential file. Each integration section below notes its specific mount requirements. *(See [`Integrations/Google-Integration.md`](Integrations/Google-Integration.md) and [`Integrations/Slack-Integration.md`](Integrations/Slack-Integration.md) in this repository for full setup detail.)*
 
 ### I.3 Google — Two Integration Paths
 
@@ -1246,14 +1246,14 @@ We use two different approaches to reach Google services:
 
 **Why two approaches?** `gog` uses Google's `threads.list` API for Gmail, which returns only the first message of a thread and ignores `in:sent` filters — unsuitable for inbox triage workflows. Our `gmail_api.py` calls `messages.list` directly, which handles inbox queries correctly. For Sheets, Drive, and outbound email sends, `gog` is the right tool. If your use case doesn't require Gmail inbox reading, `gog` alone may suffice.
 
-**A note on path names:** The Google OAuth `token.json` and `credentials.json` files live in directories named `~/.local/share/gsuite-mcp/` and `~/.config/gsuite-mcp/`. These names are a legacy artifact — the files are standard Google OAuth credentials with no runtime dependency on gsuite-mcp. See `Integrations/Google-Integration.md` for the full explanation and setup instructions.
+**A note on path names:** The Google OAuth `token.json` and `credentials.json` files live in directories named `~/.local/share/gsuite-mcp/` and `~/.config/gsuite-mcp/`. These names are a legacy artifact — the files are standard Google OAuth credentials with no runtime dependency on gsuite-mcp. See [`Integrations/Google-Integration.md`](Integrations/Google-Integration.md) for the full explanation and setup instructions.
 
-**Google Cloud setup** (done once before the lab — full steps in `Integrations/Google-Integration.md`):
+**Google Cloud setup** (done once before the lab — full steps in [`Integrations/Google-Integration.md`](Integrations/Google-Integration.md)):
 - Create a Google Cloud project and enable the APIs you need: Gmail, People, Drive, Sheets as applicable
 - Configure the OAuth consent screen (internal or external depending on your Google Workspace plan)
 - Download `credentials.json` from the API credentials page
 - Run the one-time OAuth browser flow to generate `token.json` (any standard Google OAuth desktop flow tool works)
-- Bind-mount both files into the agent sandbox per the instructions in `Integrations/Google-Integration.md`
+- Bind-mount both files into the agent sandbox per the instructions in [`Integrations/Google-Integration.md`](Integrations/Google-Integration.md)
 
 **Sharing agent output with users via Google Drive**
 
@@ -1274,7 +1274,59 @@ gog drive upload /tmp/report.md \
 
 `--json` returns structured output including `webViewLink` (the URL to share). `--convert` uploads as a Google Doc rather than a raw attachment — preferred for reports the user will read in the browser. After uploading, the agent shares the link in the current channel and cleans up `/tmp/`.
 
-Full setup procedure and command reference: `Integrations/GOG-Integration.md`.
+Full setup procedure and command reference: [`Integrations/GOG-Integration.md`](Integrations/GOG-Integration.md).
+
+---
+
+### I.4 Web Tools — Search, Fetch, and Browser
+
+*(Full step-by-step setup is in [`Integrations/WebTools-Integration.md`](Integrations/WebTools-Integration.md) in this repository. The following is an overview.)*
+
+OpenClaw provides three native web tools — no MCP servers or third-party installs required beyond a Brave Search API key:
+
+| Tool | Use for | Credential |
+|---|---|---|
+| `web_search` | Discovery, search results, finding URLs | Brave Search API key (free: 2,000/month) |
+| `web_fetch` | Read a known static URL cheaply; no JS execution | None |
+| browser | JS-heavy pages, login-required pages, Google Form filling | None (gateway-managed session) |
+
+**Configuration in config.yaml** — Web search and fetch are enabled globally with a top-level `tools.web` block; the browser is enabled with a top-level `browser:` block. Both are applied via `apply-config.sh`. Per-agent restrictions use two separate mechanisms: `tools.deny` for blocking `web_search` and `web_fetch`, and `sandbox.browser.enabled: false` for blocking browser access. An agent with neither restriction can use all three tools:
+
+```yaml
+tools:
+  web:
+    search:
+      enabled: true
+      provider: brave     # API key in secrets.yaml as brave_search_api_key
+    fetch:
+      enabled: true
+
+browser:
+  enabled: true
+  ssrfPolicy:
+    allowPrivateNetwork: false   # required — blocks browser from reaching Docker bridge
+
+agents:
+  restricted-agent:
+    model: argo/argo:claude-4.6-sonnet
+    tools:
+      deny:
+        - web_search
+        - web_fetch
+    sandbox:
+      browser:
+        enabled: false
+```
+
+**`web_fetch` vs. browser:** `web_fetch` is fast and cheap — it makes a plain HTTP GET and returns the response body. It does not execute JavaScript. Pages that render their content entirely via JS return an empty skeleton. If `web_fetch` returns useless content, use the browser instead.
+
+**SSRF:** `web_search` and `web_fetch` run in the gateway process, not inside agent sandbox containers — iptables rules on Docker do not apply to them. The `browser:` block's `ssrfPolicy.allowPrivateNetwork: false` setting handles SSRF protection for the browser. Do not enable the browser without this setting.
+
+**Browser authentication:** OpenClaw manages the browser internally — there are no named profile config options for the typical setup. Persistent login state (e.g., staying signed in to Google) is maintained in the gateway's internal session. To pre-authenticate an account, start a browser session from the dashboard and sign in manually; OpenClaw persists the session automatically.
+
+**Google Form filling — two-step pattern:** Because form submissions are irreversible, agents follow a mandatory two-step protocol: fill all fields and take a screenshot, then **stop and notify the operator**. The operator reviews the screenshot and sends an explicit `CONFIRM_SUBMIT` task. Only after receiving that task does the agent click Submit. Each agent workspace contains `runbooks/RUNBOOK_FILL_FORM.md` with the exact procedure. There is no technical enforcement — the runbook is the control.
+
+**Upgrade path:** If Brave search results are insufficient for a specific task, Exa (neural search + content extraction in one API call) is the recommended next step. Do not add Firecrawl (routes content through third-party cloud) or Playwright MCP (registry install, broader attack surface). Add third-party tools only when a specific real task demonstrably fails with the built-in tools.
 
 ---
 
@@ -1393,7 +1445,7 @@ The fix is architectural, not a mount flag: each runtime environment owns its cr
 
 With this separation, Docker and host never share mutable state. A token refresh inside Docker cannot affect the host's credentials, and vice versa.
 
-The `:ro` mount is a belt-and-suspenders precaution once the credential stores are properly separated — but the root fix is the separation itself. See `Integrations/GOG-Integration.md` for the specific bind-mount configuration.
+The `:ro` mount is a belt-and-suspenders precaution once the credential stores are properly separated — but the root fix is the separation itself. See [`Integrations/GOG-Integration.md`](Integrations/GOG-Integration.md) for the specific bind-mount configuration.
 
 ---
 
@@ -1569,7 +1621,7 @@ Students will:
 
 ---
 
-*Outline version: 2026-04-06 rev 15 — I.1 Slack: expanded outbound post problem with sessions_send vs. outbox distinction and inter-agent messaging; Lesson 13 added: sessions_send failure mode and three-part fix; Key Files: RUNBOOK_SLACK_POST.md added.*
+*Outline version: 2026-04-07 rev 16 — I.4 Web Tools added (web_search, web_fetch, browser, FILL_FORM pattern); Section 3 heading updated; integration guide links converted to clickable markdown links throughout; WebTools-Integration.md added to Integrations/.*
 
 ---
 
