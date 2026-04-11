@@ -641,6 +641,24 @@ channels:
 ```
 `apply-config.sh` syncs two things in `openclaw.json` on every run: the `bindings[]` array (which agent handles a channel) and the `channels.slack.channels` allowlist (which channels deliver events to the gateway at all). Both must include a channel for it to work — OpenClaw silently drops events from channels not in the allowlist regardless of bindings. Managing them separately by hand is a common source of silent failures; `apply-config.sh` keeps them in sync automatically. Do not edit either list by hand.
 
+**MCP servers** — remote tool servers connected to all agents:
+```yaml
+mcp:
+  servers:
+    sensor-network:
+      url: "https://sensors.example.org/mcp"
+      auth:
+        token_secret: sensor_network_token
+        token_format: "Bearer {username}:{token}"
+        username: "your-username"
+```
+`apply-config.sh` replaces the entire `mcp.servers` dictionary in `openclaw.json` on every
+run — stale entries not listed in `config.yaml` are removed automatically. Auth tokens are
+read from `secrets.yaml`; the token value never appears in `config.yaml` or the logs.
+If the `mcp:` key is absent from `config.yaml`, the existing `openclaw.json` MCP block is
+left untouched for backward compatibility. See `Integrations/MCP-Integration.md` for the
+full setup guide.
+
 **API keys** — in `secrets.yaml` (gitignored, never committed):
 ```yaml
 anthropic_api_key: sk-ant-...
@@ -661,7 +679,7 @@ anthropic_api_key: sk-ant-...
 
 The value of this layer is that changes to running agent configuration take under 30 seconds and never require touching `docker-compose.yml`, restarting Docker stacks, or editing raw JSON. The barrier to experimenting with models and routing is essentially zero.
 
-`config.yaml` currently manages four sections of `openclaw.json`: global defaults (including `fallback_model`), custom provider registration, per-agent model assignments, and Slack channel bindings (both `bindings[]` and the `channels.slack.channels` allowlist). We expect this pattern to grow. Other configuration values in `openclaw.json` — sandbox settings, heartbeat intervals, tool permissions — are also candidates for config.yaml abstraction. Any value that a deployer might want to change regularly and safely without dashboard access is a good candidate. The mechanism is established; the scope can expand.
+`config.yaml` currently manages five sections of `openclaw.json`: global defaults (including `fallback_model`), custom provider registration, per-agent model assignments, Slack channel bindings (both `bindings[]` and the `channels.slack.channels` allowlist), and MCP server registration. We expect this pattern to grow. Other configuration values in `openclaw.json` — sandbox settings, heartbeat intervals, tool permissions — are also candidates for config.yaml abstraction. Any value that a deployer might want to change regularly and safely without dashboard access is a good candidate. The mechanism is established; the scope can expand.
 
 ---
 
@@ -1327,6 +1345,39 @@ agents:
 **Google Form filling — two-step pattern:** Because form submissions are irreversible, agents follow a mandatory two-step protocol: fill all fields and take a screenshot, then **stop and notify the operator**. The operator reviews the screenshot and sends an explicit `CONFIRM_SUBMIT` task. Only after receiving that task does the agent click Submit. Each agent workspace contains `runbooks/RUNBOOK_FILL_FORM.md` with the exact procedure. There is no technical enforcement — the runbook is the control.
 
 **Upgrade path:** If Brave search results are insufficient for a specific task, Exa (neural search + content extraction in one API call) is the recommended next step. Do not add Firecrawl (routes content through third-party cloud) or Playwright MCP (registry install, broader attack surface). Add third-party tools only when a specific real task demonstrably fails with the built-in tools.
+
+---
+
+### I.4 MCP Servers
+
+MCP (Model Context Protocol) is an open standard for connecting AI agents to external tools and data sources over HTTP. An MCP server exposes a list of callable tools; the OpenClaw gateway discovers them at startup and makes them available to agents exactly like built-in tools. The agent calls them by name; the gateway handles the HTTP transport.
+
+**What changes with MCP:** Without MCP, extending an agent's capabilities requires writing a sandbox script, granting exec permissions, and managing the script's dependencies inside the Docker sandbox. With MCP, you connect a running HTTP service and the tools appear automatically — no sandbox changes, no exec approvals, no script deployment.
+
+**Adding an MCP server** is done entirely through `config.yaml`:
+
+```yaml
+mcp:
+  servers:
+    my-server:
+      url: "https://my-mcp-server.example.com/mcp"
+      auth:
+        token_secret: my_server_token   # key in secrets.yaml; value never appears here
+```
+
+```bash
+python3 apply-config.sh   # writes to openclaw.json and restarts the gateway
+```
+
+After restart, ask any agent `What tools do you have available?` — the MCP server's tools appear alongside built-in tools.
+
+**Authentication:** Most MCP servers require a bearer token. `config.yaml` names the secrets key; `secrets.yaml` holds the value. The token is written into `openclaw.json` inside the Docker volume but never into the repo. Some servers use the format `Bearer username:token` — set `token_format: "Bearer {username}:{token}"` and `username` in the auth block.
+
+**Scope:** MCP servers configured at the top level are available to all agents. Per-agent MCP restrictions must be managed directly in `openclaw.json` — `config.yaml` does not yet support per-agent MCP assignment.
+
+**Removing a server:** Delete its entry from `config.yaml` and re-run `apply-config.sh`. The script replaces the entire `mcp.servers` block on every run — stale entries not in `config.yaml` are removed. If the `mcp:` key is absent from `config.yaml` entirely, the existing `openclaw.json` MCP block is left untouched (backward compatibility for configs written before MCP support).
+
+Full step-by-step setup, transport modes (`streamable-http` vs `sse`), troubleshooting, and security considerations: `Integrations/MCP-Integration.md`.
 
 ---
 

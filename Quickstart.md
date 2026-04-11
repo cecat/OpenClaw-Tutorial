@@ -178,6 +178,7 @@ docker logs openclaw-gateway --tail 50
 | **Gmail** | Personal email assistant agent | [Google-Integration.md](Integrations/Google-Integration.md) + [GOG-Integration.md](Integrations/GOG-Integration.md) |
 | **Google Drive / Sheets / Contacts** | Agents read and write Google Workspace | [GOG-Integration.md](Integrations/GOG-Integration.md) |
 | **Web search / fetch / browser** | Agents search the web, read URLs, and fill forms | [WebTools-Integration.md](Integrations/WebTools-Integration.md) |
+| **MCP servers** | Connect external tools and data sources via HTTP | [MCP-Integration.md](Integrations/MCP-Integration.md) |
 
 Each guide tells you which credential bind mounts to uncomment in
 `gateway/docker-compose.yml` and what to add to `config.yaml`.
