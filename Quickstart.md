@@ -258,6 +258,27 @@ docker compose down
 docker compose down -v
 ```
 
+## Pausing and resuming agents
+
+If an agent (or a send pipeline) starts doing something you want it to stop doing
+*now*, you don't need to restart Docker or edit `openclaw.json`. Touch a sentinel
+file under `shared/state/`:
+
+```bash
+touch shared/state/PAUSE.agent.<id>     # stop one agent
+touch shared/state/PAUSE.email          # stop the email sender only
+touch shared/state/PAUSE.slack          # stop the Slack sender only
+touch shared/state/PAUSE.global         # stop everything (all senders + all agents)
+
+rm shared/state/PAUSE.agent.<id>        # resume
+```
+
+Cron senders (`check-todos.sh`, `send-email.sh`, `send-slack.sh`) and every agent
+heartbeat check these files on the way in; effective within one cron cycle (5–30
+min). Queued work (outbox drafts, READY TODO items) is preserved, not discarded.
+See Lesson 14 for the design rationale and your deployment's runbook for any
+wrapper scripts that record reason / engage Slack notifications on top.
+
 ## Re-authenticating Google accounts
 
 Google OAuth refresh tokens can be revoked in several situations: if you change your

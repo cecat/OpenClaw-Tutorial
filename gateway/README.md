@@ -109,6 +109,35 @@ walk through both:
 
 ---
 
+## Runtime pause/resume
+
+The gateway's operational control surface has three knobs at three different
+grains:
+
+- **`apply-config.sh`** — configuration changes (model assignments, channel
+  bindings); takes effect on the next gateway restart.
+- **`docker compose restart openclaw-gateway`** — restart the whole gateway;
+  blunt, takes ~10s, drops anything in flight.
+- **Pause sentinel files under `shared/state/`** — *finer* than either of the
+  above. Stop one sender or one agent without restarting anything, take effect
+  within one cron cycle (5–30 min), reverse by removing the file.
+
+| Sentinel                  | Effect |
+|---------------------------|--------|
+| `PAUSE.global`            | All cron senders and all agent heartbeats exit cleanly without acting. |
+| `PAUSE.email`             | `send-email.sh` exits 0; approved drafts stay queued in `email/outbox/`. |
+| `PAUSE.slack`             | `send-slack.sh` exits 0; pending posts stay queued in `slack/outbox/`. |
+| `PAUSE.agent.<id>`        | `check-todos.sh` skips that agent; the agent's heartbeat sees the file as Step 0 and replies `HEARTBEAT_OK` without acting. |
+
+`shared/state/` is mounted into both the gateway and the agent sandboxes.
+Agents *read* these files; they should never *write* them — pause is an
+operator primitive. Note the limitation: pause is checked at the start of a
+turn, not mid-turn. A turn already in flight will complete before pause takes
+effect. See `OpenClaw-Tutorial.md` Lesson 14 for the design rationale and
+[Quickstart.md](../Quickstart.md#pausing-and-resuming-agents) for commands.
+
+---
+
 ## Security notes
 
 - **Never change the port binding to `0.0.0.0`** — the gateway binds to your

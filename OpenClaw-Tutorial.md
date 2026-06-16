@@ -226,6 +226,33 @@ Critically, these rules do not block outbound connections to the public internet
 
 Tailscale operates as a WireGuard-based overlay network (L3 VPN). It assigns virtual IP addresses in the 100.64.0.0/10 CGNAT range to each enrolled device and creates a `tailscale0` virtual interface on the host. The OpenClaw gateway port is bound to the host's Tailscale IP address, not to 0.0.0.0. Traffic reaching that port therefore arrives only via the Tailscale interface — meaning only from devices enrolled in your Tailscale network. The iptables rules ensure that containers cannot forge connections to those virtual IPs and thereby bypass the network isolation. *(See FIXES.md for notes on further egress hardening if needed.)*
 
+<a id="iptables-rules"></a>
+**Setting up the iptables rules.** Replace `LAN_SUBNET` with your local network's CIDR range and `DOCKER_SUBNET` with the subnet used by your Docker bridge (check with `docker network inspect bridge | grep Subnet`).
+
+```bash
+DOCKER_SUBNET="172.18.0.0/16"
+LAN_SUBNET="10.0.4.0/22"
+TAILSCALE_CGNAT="100.64.0.0/10"
+
+# Block containers from reaching your LAN
+sudo iptables -I DOCKER-USER -s $DOCKER_SUBNET -d $LAN_SUBNET -j DROP
+
+# Block containers from reaching Tailscale virtual IPs
+sudo iptables -I DOCKER-USER -s $DOCKER_SUBNET -d $TAILSCALE_CGNAT -j DROP
+
+# Block containers from SSH to any destination
+sudo iptables -I DOCKER-USER -s $DOCKER_SUBNET -p tcp --dport 22 -j DROP
+
+# Persist across reboots
+sudo apt install iptables-persistent -y && sudo netfilter-persistent save
+```
+
+Verify with:
+
+```bash
+sudo iptables -L DOCKER-USER -n | grep DROP   # must show 3 rules
+```
+
 *CVE (Common Vulnerabilities and Exposures) identifiers are standardized labels assigned to publicly-disclosed security vulnerabilities, maintained by MITRE. Links to original coverage are provided for each CVE cited.*
 
 There is a growing body of "how-to" material for deploying OpenClaw, and it is striking how little attention is paid to security and containment. A 2025 survey — [The 2025 AI Agent Index](https://arxiv.org/abs/2602.17753) (MIT) — found that the majority of deployed agentic AI systems document no sandboxing or containment mechanisms at all. We treat the layers above as non-negotiable precisely because the default is to omit them.
@@ -600,6 +627,14 @@ docker compose exec openclaw-gateway ls /home/node/.ssh   # must fail
 # Sandbox container network isolation (3 DROP rules)
 sudo iptables -L DOCKER-USER -n | grep DROP   # must show 3 rules
 ```
+
+**Runtime kill switch.** Everything above is *structural* containment — it makes certain actions impossible. There is also a class of situation where the structural defenses are working as designed and the agent is still doing something you want it to stop doing right now: a misclassified email about to send, a Slack loop spinning up, a runbook executing on stale data. For that, define a small set of *sentinel files* under `shared/state/` that every cron sender and every agent heartbeat checks on the way in:
+
+- `PAUSE.global` — every cron-driven sender and every agent heartbeat exits cleanly without acting
+- `PAUSE.email` / `PAUSE.slack` — stop a single send pipeline; queued drafts remain in their outbox
+- `PAUSE.agent.<id>` — stop one agent; `check-todos.sh` skips its READY promotion and the agent's heartbeat sees the file as Step 0
+
+An operator pauses by `touch`ing the file and resumes by removing it; effect lands within one cron cycle (5–30 min), no Docker restart, no `openclaw.json` surgery. Crucially, when an agent is paused its heartbeat must still emit `HEARTBEAT_OK` and close — see Lesson 10. The full operational rationale is in Lesson 14; the Quickstart shows the commands.
 
 ---
 
@@ -1607,6 +1642,32 @@ The fix — three parts required together:
 **3. `RUNBOOK_SLACK_POST.md`:** Add a runbook in each agent's `runbooks/` directory with the outbox JSON pattern. Describing it in prose is not enough — agents executing a READY task follow a recipe, not a description. The runbook must contain the exact `exec: python3 -c "..."` block with the correct fields (`channel`, `text`, `requested_by`, `requested_at`, `status: "pending"`).
 
 The correct division of labor: `sessions_send` for replies in the current conversation; outbox for everything else — cross-channel posts, DMs to users not in the current session, inter-agent messages, and all scheduled/heartbeat-triggered Slack output.
+
+---
+
+**Lesson 14: A runtime kill switch belongs at the same layer as the work it stops, not above it**
+
+The general principle: every multi-agent deployment eventually has an "oh no, stop *now*" moment — an agent is about to send a misclassified email, a Slack thread is about to get a flurry of follow-ups based on a misread, a scheduled task is firing against stale state. The structural defenses in Enhancement 1 are working perfectly; that is not the problem. The problem is that the agent is *correctly* doing something you no longer want it to do, and you need it to stop in seconds, not minutes. Without a primitive designed for this, every operator reaches for tools that are either too coarse, too slow, too durable, or too destructive.
+
+How it manifests:
+- The fastest tool to hand is `docker compose down`. This stops everything — including the gateway you would use to DM the agent and ask what it thought it was doing. The shutdown takes 5–10 seconds. The restart takes 30–60 seconds and tears down any in-progress diagnostics.
+- The next option is editing `openclaw.json` to deactivate the agent. This is precise but slow — extract, edit, copy back, restart, ~90 seconds of typing while the situation is live.
+- Commenting out cron lines stops *future* runs but leaves no audit trail, is easy to forget to revert, and silently fails if the cron daemon has already queued a run.
+- Truncating the session file forces the agent to start fresh — but it is destructive, it discards the context you might want for postmortem, and (if you do it wrong, per Lesson 10) it can leave the agent silenced indefinitely.
+
+Each of these tools exists for a different reason and is correct in its own domain. None of them was designed for *"this specific pipeline, right now, reversibly, with a record of why."*
+
+The fix: define a small set of sentinel files under `shared/state/` and add a one-line existence check at the top of every cron sender and as Step 0 of every agent heartbeat. The check is dumb — file exists → exit clean → done. Four useful granularities cover essentially every real incident: `PAUSE.global`, `PAUSE.email`, `PAUSE.slack`, and `PAUSE.agent.<id>`. Engage by `touch`ing the file; resume by `rm`-ing it. Effect lands within one cron cycle.
+
+Two design rules make this work and not bite you later:
+
+**1. Paused does not mean killed.** The agent's heartbeat still fires; it just sees the sentinel as Step 0, replies `HEARTBEAT_OK`, and closes. This is non-negotiable — see Lesson 10. An agent whose heartbeat ends *without* `HEARTBEAT_OK` goes silent permanently. A kill switch that flips agents into the Lesson 10 failure mode is worse than no kill switch.
+
+**2. Sentinels are an operator primitive — agents read them, agents never write them.** If the agent could create its own pause file it could pause itself for any reason, including reasons you would not endorse, and recover with no record. Keep the writer outside the trust boundary.
+
+A small wrapper script around `touch` and `rm` is worth building once you have the primitive: record who paused what, when, and why inside the sentinel file, and DM the operator on engage/release. The sentinel itself is just file existence; the wrapper makes the audit trail free. Per-deployment runbook covers the wrapper; this lesson covers the pattern.
+
+The deeper lesson is structural: a kill switch *above* the work it stops (process supervisor, container orchestrator, network layer) is too coarse to use during ordinary operation, so it never gets used until the incident is already large. A kill switch *at the same layer* as the work — a file the worker checks on the way in — is cheap enough to use for small situations, which is exactly when stopping early matters most.
 
 ---
 
